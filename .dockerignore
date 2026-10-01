@@ -1,0 +1,7 @@
+.dockerignore
+.git
+bin/
+dist/
+tmp/
+coverage*.txt
+coverage*.html
