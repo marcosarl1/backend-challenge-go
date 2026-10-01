@@ -13,6 +13,7 @@ var (
 	ErrOverflow         = errors.New("domínio: estouro numérico")
 
 	ErrInsufficientFunds = errors.New("domínio: saldo insuficiente")
+	ErrAlreadyOpened     = errors.New("domínio: abertura já aplicada")
 	ErrInvalidTransition = errors.New("domínio: transição de estado inválida")
 	ErrTerminalState     = errors.New("domínio: estado final não muda")
 )
