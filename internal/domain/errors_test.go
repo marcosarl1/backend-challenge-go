@@ -15,6 +15,7 @@ func TestSentinelsAreDistinct(t *testing.T) {
 		ErrOverflow,
 		ErrInsufficientFunds,
 		ErrAlreadyOpened,
+		ErrInvalidKind,
 		ErrInvalidTransition,
 		ErrTerminalState,
 	}
