@@ -1,11 +1,13 @@
 package money
 
-import "errors"
+import (
+	"github.com/marcosarl1/backend-challenge-go/internal/domain"
+)
 
 var (
-	ErrInvalidMoney     = errors.New("money: valor inválido")
-	ErrInvalidCurrency  = errors.New("money: moeda inválida")
-	ErrUninitialized    = errors.New("money: valor não inicializado")
-	ErrCurrencyMismatch = errors.New("money: moedas incompatíveis")
-	ErrOverflow         = errors.New("money: estouro numérico")
+	ErrInvalidMoney     = domain.ErrInvalidMoney
+	ErrInvalidCurrency  = domain.ErrInvalidCurrency
+	ErrUninitialized    = domain.ErrUninitialized
+	ErrCurrencyMismatch = domain.ErrCurrencyMismatch
+	ErrOverflow         = domain.ErrOverflow
 )
