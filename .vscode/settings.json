@@ -1,0 +1,6 @@
+{
+  // Arquivos com //go:build integration (testes contra infra de verdade)
+  // também fazem parte do workspace.
+  "go.buildTags": "integration",
+  "go.testTags": "integration"
+}
