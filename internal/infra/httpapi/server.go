@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,28 +20,53 @@ import (
 // Server expõe os casos de uso em HTTP. Handlers finos: parseiam, chamam e
 // traduzem; regra mora na aplicação.
 type Server struct {
-	uow   application.UnitOfWork
-	auth  Authenticator
-	clock application.Clock
-	ids   application.IDGenerator
+	uow    application.UnitOfWork
+	auth   Authenticator
+	clock  application.Clock
+	ids    application.IDGenerator
+	checks []HealthChecker
+}
+
+// HealthChecker é uma dependência que a prontidão confere.
+type HealthChecker interface {
+	Name() string
+	Check(ctx context.Context) error
 }
 
 // New monta o servidor sobre as dependências.
-func New(uow application.UnitOfWork, auth Authenticator, clock application.Clock, ids application.IDGenerator) *Server {
-	return &Server{uow: uow, auth: auth, clock: clock, ids: ids}
+func New(uow application.UnitOfWork, auth Authenticator, clock application.Clock, ids application.IDGenerator, checks ...HealthChecker) *Server {
+	return &Server{uow: uow, auth: auth, clock: clock, ids: ids, checks: checks}
 }
 
-// Handler monta as rotas.
+// NewHTTPServer monta o servidor HTTP com prazos: cabeçalho lento não prende
+// conexão, resposta lenta demais é cortada, ociosa recicla.
+func NewHTTPServer(handler http.Handler, addr string) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
+// Handler monta as rotas: saúde pública, negócio autenticado.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /wallets", s.handleOpenWallet)
-	mux.HandleFunc("GET /wallets/{walletId}", s.handleGetWallet)
-	mux.HandleFunc("GET /wallets/{walletId}/ledger", s.handleListLedger)
-	mux.HandleFunc("POST /wallets/{walletId}/reconciliation", s.handleReconcile)
-	mux.HandleFunc("POST /wagering/transactions", s.handleProcess)
-	mux.HandleFunc("GET /wagering/transactions/{transactionId}", s.handleGetTransaction)
-	mux.HandleFunc("GET /providers/{providerId}/wagering/transactions/{externalTransactionId}", s.handleGetByExternal)
-	return s.withCorrelation(s.withAuth(mux))
+	mux.HandleFunc("GET /health/live", s.handleLive)
+	mux.HandleFunc("GET /health/ready", s.handleReady)
+
+	biz := http.NewServeMux()
+	biz.HandleFunc("POST /wallets", s.handleOpenWallet)
+	biz.HandleFunc("GET /wallets/{walletId}", s.handleGetWallet)
+	biz.HandleFunc("GET /wallets/{walletId}/ledger", s.handleListLedger)
+	biz.HandleFunc("POST /wallets/{walletId}/reconciliation", s.handleReconcile)
+	biz.HandleFunc("POST /wagering/transactions", s.handleProcess)
+	biz.HandleFunc("GET /wagering/transactions/{transactionId}", s.handleGetTransaction)
+	biz.HandleFunc("GET /providers/{providerId}/wagering/transactions/{externalTransactionId}", s.handleGetByExternal)
+	mux.Handle("/", s.withAuth(biz))
+	return s.withCorrelation(s.withRecover(mux))
 }
 
 // withCorrelation carrega ou gera o id de correlação (vai e volta no header,
@@ -55,7 +82,47 @@ func (s *Server) withCorrelation(next http.Handler) http.Handler {
 	})
 }
 
+// errPanic é o erro interno quando um handler estoura.
+var errPanic = errors.New("falha interna")
+
 // withAuth exige Bearer válido e guarda a identidade no contexto.
+func (s *Server) withRecover(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				slog.ErrorContext(r.Context(), "pânico no handler",
+					"path", r.URL.Path, "panic", recovered)
+				writeError(w, r, errPanic)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// handleLive diz que o processo está de pé (público, sem dependência).
+func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"status": "live"})
+}
+
+// handleReady confere as dependências (público): banco e fila respondendo é
+// 200; qualquer uma fora é 503 com quem falhou.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	var failing []string
+	for _, check := range s.checks {
+		if err := check.Check(ctx); err != nil {
+			failing = append(failing, check.Name())
+		}
+	}
+	if len(failing) > 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "not-ready", "failing": failing,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})
+}
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw := r.Header.Get("Authorization")

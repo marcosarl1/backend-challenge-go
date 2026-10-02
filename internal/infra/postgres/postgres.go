@@ -40,6 +40,26 @@ func Connect(ctx context.Context, connString string) (*pgxpool.Pool, error) {
 // maxAttempts limita a repetição em serialização/conflito (tentativa inicial + repetições). A função precisa ser pura de efeitos fora da transação: repetir executa tudo de novo.
 const maxAttempts = 3
 
+// PingChecker prova que o banco responde, para a saúde do serviço.
+type PingChecker struct {
+	pool *pgxpool.Pool
+}
+
+// NewPingChecker monta o cheque sobre um pool aberto.
+func NewPingChecker(pool *pgxpool.Pool) PingChecker {
+	return PingChecker{pool: pool}
+}
+
+// Name identifica o cheque de saúde.
+func (c PingChecker) Name() string { return "postgres" }
+
+// Check pinga com prazo curto.
+func (c PingChecker) Check(ctx context.Context) error {
+	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return c.pool.Ping(pingCtx)
+}
+
 // UnitOfWork amarra vários repositórios na mesma transação: ou tudo confirma junto, ou nada confirma. Conflito de escrita (40001/40P01) tenta de novo do zero, em transação nova.
 type UnitOfWork struct {
 	pool *pgxpool.Pool

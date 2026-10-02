@@ -22,7 +22,7 @@ test-race:
 	go test -race ./...
 
 test-integration:
-	TEST_DATABASE_URL="$(DATABASE_URL)" TEST_KEYCLOAK_URL="http://localhost:8080" go test -race ./test/integration/
+	TEST_DATABASE_URL="$(DATABASE_URL)" TEST_KEYCLOAK_URL="http://localhost:8080" TEST_SQS_ENDPOINT="http://localhost:4566" go test -race ./test/integration/
 
 vet:
 	go vet ./...
