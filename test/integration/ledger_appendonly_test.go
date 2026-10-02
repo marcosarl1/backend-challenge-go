@@ -1,3 +1,5 @@
+//go:build integration
+
 // Roda com:
 //
 //	TEST_DATABASE_URL=postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable \
