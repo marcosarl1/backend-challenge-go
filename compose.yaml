@@ -1,6 +1,23 @@
 name: backend-challenge-go
 
 services:
+  db:
+    image: postgres:17.11-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: wagering
+      POSTGRES_USER: wagering
+      POSTGRES_PASSWORD: wagering
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagering -d wagering"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
   sqs:
     image: ministackorg/ministack:1.5.20
     ports:
@@ -32,3 +49,6 @@ services:
       timeout: 3s
       retries: 40
       start_period: 20s
+
+volumes:
+  pgdata:

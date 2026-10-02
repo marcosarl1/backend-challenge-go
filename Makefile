@@ -1,5 +1,8 @@
 .PHONY: up down migrate-up migrate-down test test-race test-integration vet fmt lint build
 
+DATABASE_URL ?= postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable
+MIGRATE_IMAGE ?= docker.io/migrate/migrate:v4.20.1
+
 up:
 	docker compose up --build
 
@@ -7,10 +10,10 @@ down:
 	docker compose down
 
 migrate-up:
-	@echo "migrations not implemented yet (T2.1)"
+	docker run --rm --network host -v ./migrations:/migrations $(MIGRATE_IMAGE) -path /migrations -database "$(DATABASE_URL)" up
 
 migrate-down:
-	@echo "migrations not implemented yet (T2.1)"
+	docker run --rm --network host -v ./migrations:/migrations $(MIGRATE_IMAGE) -path /migrations -database "$(DATABASE_URL)" down 1
 
 test:
 	go test ./...
