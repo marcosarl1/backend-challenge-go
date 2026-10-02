@@ -2,6 +2,7 @@ package sqs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -127,6 +128,26 @@ func (c *Client) Receive(ctx context.Context, queueURL string, max, waitSeconds 
 		})
 	}
 	return messages, nil
+}
+
+// SendDLQ copia a mensagem arsenicada para a DLQ com o motivo, mantendo o identificador para deduplicar por lá também.
+func (c *Client) SendDLQ(ctx context.Context, dlqURL, originalBody, reason, dedupID string) error {
+	payload, err := json.Marshal(map[string]string{
+		"reason": reason, "messageId": dedupID, "body": originalBody,
+	})
+	if err != nil {
+		return fmt.Errorf("sqs: envelope da DLQ: %w", err)
+	}
+	_, err = c.inner.SendMessage(ctx, &sqssdk.SendMessageInput{
+		QueueUrl:               aws.String(dlqURL),
+		MessageBody:            aws.String(string(payload)),
+		MessageGroupId:         aws.String("dlq"),
+		MessageDeduplicationId: aws.String(dedupID),
+	})
+	if err != nil {
+		return fmt.Errorf("sqs: para a DLQ: %w", err)
+	}
+	return nil
 }
 
 // Delete confirma a mensagem (só depois do commit no banco).
