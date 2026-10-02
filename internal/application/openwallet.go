@@ -2,7 +2,6 @@ package application
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -74,9 +73,25 @@ func OpenWallet(ctx context.Context, uow UnitOfWork, clock Clock, ids IDGenerato
 		if err != nil {
 			return err
 		}
+		var entry wallet.LedgerEntry
+		var opening *wager.WagerTransaction
+		if withMovement != 0 {
+			openingID, err := ids.NewID()
+			if err != nil {
+				return fmt.Errorf("gerando abertura: %w", err)
+			}
+			if entry, err = w.ApplyOpening(openingID, cmd.InitialBalance, now); err != nil {
+				return err
+			}
+			if opening, err = wager.NewOpening(wager.OpeningParams{
+				ID: openingID, WalletID: walletID, PlayerID: cmd.PlayerID, Amount: cmd.InitialBalance,
+			}, now); err != nil {
+				return err
+			}
+		}
+		// A carteira entra já com o saldo final: sem UPDATE posterior.
 		if err := r.Wallets.Insert(ctx, w); err != nil {
-			var conflict *ConflictError
-			if errors.As(err, &conflict) {
+			if conflict, ok := AsType[*ConflictError](err); ok {
 				return fmt.Errorf("%w: %s", ErrWalletExists, conflict.Constraint)
 			}
 			return err
@@ -84,7 +99,7 @@ func OpenWallet(ctx context.Context, uow UnitOfWork, clock Clock, ids IDGenerato
 		if withMovement == 0 {
 			return nil
 		}
-		return openWithMovement(ctx, r, ids, w, cmd, now, result)
+		return openWithMovement(ctx, r, ids, w, opening, entry, cmd, now, result)
 	})
 	if err != nil {
 		return nil, err
@@ -92,39 +107,8 @@ func OpenWallet(ctx context.Context, uow UnitOfWork, clock Clock, ids IDGenerato
 	return result, nil
 }
 
-func isConflict(err error, target **ConflictError) bool {
-	type causer interface{ error }
-	var _ causer
-	for err != nil {
-		if c, ok := err.(*ConflictError); ok {
-			*target = c
-			return true
-		}
-		u, ok := err.(interface{ Unwrap() error })
-		if !ok {
-			return false
-		}
-		err = u.Unwrap()
-	}
-	return false
-}
-
 // openWithMovement grava abertura, lançamento e eventos na transação aberta.
-func openWithMovement(ctx context.Context, r Repositories, ids IDGenerator, w *wallet.Wallet, cmd OpenWalletCommand, now time.Time, result *OpenWalletResult) error {
-	openingID, err := ids.NewID()
-	if err != nil {
-		return fmt.Errorf("gerando abertura: %w", err)
-	}
-	entry, err := w.ApplyOpening(openingID, cmd.InitialBalance, now)
-	if err != nil {
-		return err
-	}
-	opening, err := wager.NewOpening(wager.OpeningParams{
-		ID: openingID, WalletID: w.ID(), PlayerID: cmd.PlayerID, Amount: cmd.InitialBalance,
-	}, now)
-	if err != nil {
-		return err
-	}
+func openWithMovement(ctx context.Context, r Repositories, ids IDGenerator, w *wallet.Wallet, opening *wager.WagerTransaction, entry wallet.LedgerEntry, cmd OpenWalletCommand, now time.Time, result *OpenWalletResult) error {
 	if _, err := r.Wagers.Insert(ctx, opening, cmd.CorrelationID); err != nil {
 		return err
 	}
@@ -135,8 +119,8 @@ func openWithMovement(ctx context.Context, r Repositories, ids IDGenerator, w *w
 	if err != nil {
 		return fmt.Errorf("gerando evento: %w", err)
 	}
-	processed, err := events.NewTransactionProcessed(processedID, openingID, cmd.CorrelationID, "", now, events.ProcessedData{
-		TransactionID: openingID, WalletID: w.ID(), PlayerID: cmd.PlayerID,
+	processed, err := events.NewTransactionProcessed(processedID, opening.ID(), cmd.CorrelationID, "", now, events.ProcessedData{
+		TransactionID: opening.ID(), WalletID: w.ID(), PlayerID: cmd.PlayerID,
 		Kind: string(wager.KindOpening), Amount: cmd.InitialBalance,
 		ResultBalance: cmd.InitialBalance, ResultWalletVersion: 1,
 	})
@@ -148,7 +132,7 @@ func openWithMovement(ctx context.Context, r Repositories, ids IDGenerator, w *w
 		return fmt.Errorf("gerando evento: %w", err)
 	}
 	changed, err := events.NewBalanceChanged(changedID, w.ID(), cmd.CorrelationID, "", now, events.BalanceChangedData{
-		WalletID: w.ID(), TransactionID: openingID, Direction: events.DirectionCredit,
+		WalletID: w.ID(), TransactionID: opening.ID(), Direction: events.DirectionCredit,
 		Amount: cmd.InitialBalance, BalanceBefore: entry.BalanceBefore(),
 		BalanceAfter: entry.BalanceAfter(), WalletVersion: 1,
 	})
@@ -170,7 +154,7 @@ func openWithMovement(ctx context.Context, r Repositories, ids IDGenerator, w *w
 		typ     string
 		payload []byte
 	}{
-		{processedID, AggregateWager, openingID, events.TypeTransactionProcessed, processedPayload},
+		{processedID, AggregateWager, opening.ID(), events.TypeTransactionProcessed, processedPayload},
 		{changedID, AggregateWallet, w.ID(), events.TypeBalanceChanged, changedPayload},
 	} {
 		if err := r.Outbox.Insert(ctx, OutboxEvent{
