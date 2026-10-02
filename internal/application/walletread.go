@@ -30,8 +30,11 @@ type WalletView struct {
 	UpdatedAt time.Time
 }
 
-// GetWallet lê a carteira.
-func GetWallet(ctx context.Context, uow UnitOfWork, walletID uuid.UUID) (*WalletView, error) {
+// GetWallet lê a carteira. Só o serviço interno.
+func GetWallet(ctx context.Context, uow UnitOfWork, ident Identity, walletID uuid.UUID) (*WalletView, error) {
+	if err := requireInternal(ident); err != nil {
+		return nil, err
+	}
 	var out *WalletView
 	err := uow.Do(ctx, func(ctx context.Context, r Repositories) error {
 		w, err := r.Wallets.Get(ctx, walletID)
@@ -71,7 +74,10 @@ type LedgerPage struct {
 }
 
 // ListLedger pagina o ledger em ordem estável. Cursor vazio começa do início; cursor inválido é entrada inválida (o HTTP vira 400).
-func ListLedger(ctx context.Context, uow UnitOfWork, walletID uuid.UUID, cursor string, limit int) (*LedgerPage, error) {
+func ListLedger(ctx context.Context, uow UnitOfWork, ident Identity, walletID uuid.UUID, cursor string, limit int) (*LedgerPage, error) {
+	if err := requireInternal(ident); err != nil {
+		return nil, err
+	}
 	if walletID == uuid.Nil {
 		return nil, fmt.Errorf("%w: carteira vazia", ErrInvalidInput)
 	}

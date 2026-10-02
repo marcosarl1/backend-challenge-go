@@ -19,7 +19,7 @@ func TestGetTransactionAllStates(t *testing.T) {
 	// Processada: com resultado.
 	bet := processCmd(t, walletID, playerID, wager.KindBet, "25.00")
 	processed := runProcess(t, runner, bet)
-	view, err := application.GetTransaction(ctx, runner, processed.TransactionID)
+	view, err := application.GetTransaction(ctx, runner, providerIdent("provider-a"), processed.TransactionID)
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestGetTransactionAllStates(t *testing.T) {
 	// Rejeitada: com código, sem resultado.
 	poor := processCmd(t, walletID, playerID, wager.KindBet, "5000.00")
 	rejected := runProcess(t, runner, poor)
-	view, err = application.GetTransactionByExternal(ctx, runner, "provider-a", poor.ExternalID)
+	view, err = application.GetTransactionByExternal(ctx, runner, providerIdent("provider-a"), "provider-a", poor.ExternalID)
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestGetTransactionAllStates(t *testing.T) {
 	// Em espera: com tentativas e agenda.
 	refUniq := uuid.NewString()
 	waiting := runProcess(t, runner, processRefCmd(t, walletID, playerID, wager.KindRefund, "10.00", "bet-w-"+refUniq))
-	view, err = application.GetTransaction(ctx, runner, waiting.TransactionID)
+	view, err = application.GetTransaction(ctx, runner, providerIdent("provider-a"), waiting.TransactionID)
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestGetTransactionAllStates(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
-	view, err = application.GetTransactionByExternal(ctx, runner, "provider-a", "bet-crua-"+refUniq)
+	view, err = application.GetTransactionByExternal(ctx, runner, providerIdent("provider-a"), "provider-a", "bet-crua-"+refUniq)
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestGetTransactionAllStates(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
-	view, err = application.GetTransaction(ctx, runner, pendingTx.ID())
+	view, err = application.GetTransaction(ctx, runner, providerIdent("provider-a"), pendingTx.ID())
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -98,10 +98,10 @@ func TestGetTransactionNotFound(t *testing.T) {
 	runner := openRunner(t)
 	ctx := context.Background()
 	ghost, _ := uuid.NewV7()
-	if _, err := application.GetTransaction(ctx, runner, ghost); !errors.Is(err, application.ErrNotFound) {
+	if _, err := application.GetTransaction(ctx, runner, providerIdent("provider-a"), ghost); !errors.Is(err, application.ErrNotFound) {
 		t.Fatalf("por id erro = %v", err)
 	}
-	if _, err := application.GetTransactionByExternal(ctx, runner, "provider-a", "ext-fantasma"); !errors.Is(err, application.ErrNotFound) {
+	if _, err := application.GetTransactionByExternal(ctx, runner, providerIdent("provider-a"), "provider-a", "ext-fantasma"); !errors.Is(err, application.ErrNotFound) {
 		t.Fatalf("por externo erro = %v", err)
 	}
 }

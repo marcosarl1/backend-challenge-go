@@ -17,7 +17,7 @@ func TestGetWallet(t *testing.T) {
 	ctx := context.Background()
 	walletID, playerID := fundWallet(t, runner, "1000.00")
 
-	view, err := application.GetWallet(ctx, runner, walletID)
+	view, err := application.GetWallet(ctx, runner, internalIdent(), walletID)
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -26,7 +26,7 @@ func TestGetWallet(t *testing.T) {
 		t.Fatalf("carteira = %+v", view)
 	}
 	ghost, _ := uuid.NewV7()
-	if _, err := application.GetWallet(ctx, runner, ghost); !errors.Is(err, application.ErrNotFound) {
+	if _, err := application.GetWallet(ctx, runner, internalIdent(), ghost); !errors.Is(err, application.ErrNotFound) {
 		t.Fatalf("fantasma erro = %v", err)
 	}
 }
@@ -46,7 +46,7 @@ func TestListLedgerPages(t *testing.T) {
 	var firstBefore, lastAfter money.Money
 	cursor := ""
 	for {
-		page, err := application.ListLedger(ctx, runner, walletID, cursor, 50)
+		page, err := application.ListLedger(ctx, runner, internalIdent(), walletID, cursor, 50)
 		if err != nil {
 			t.Fatalf("erro inesperado: %v", err)
 		}
@@ -88,7 +88,7 @@ func TestListLedgerPages(t *testing.T) {
 	}
 
 	// Teto: pedido gigante volta no máximo 100, com cursor para seguir.
-	full, err := application.ListLedger(ctx, runner, walletID, "", 10000)
+	full, err := application.ListLedger(ctx, runner, internalIdent(), walletID, "", 10000)
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -104,12 +104,12 @@ func TestListLedgerCursorAndLimit(t *testing.T) {
 
 	// Cursor inválido é entrada inválida (o HTTP vira 400).
 	for _, bad := range []string{"!!!", "aGk=", "bm90LWpzb24=", "eyJzZXEiOi0xfQ=="} {
-		if _, err := application.ListLedger(ctx, runner, walletID, bad, 50); !errors.Is(err, application.ErrInvalidInput) {
+		if _, err := application.ListLedger(ctx, runner, internalIdent(), walletID, bad, 50); !errors.Is(err, application.ErrInvalidInput) {
 			t.Fatalf("cursor %q erro = %v", bad, err)
 		}
 	}
 	ghost, _ := uuid.NewV7()
-	if _, err := application.ListLedger(ctx, runner, ghost, "", 50); !errors.Is(err, application.ErrNotFound) {
+	if _, err := application.ListLedger(ctx, runner, internalIdent(), ghost, "", 50); !errors.Is(err, application.ErrNotFound) {
 		t.Fatalf("fantasma erro = %v", err)
 	}
 }

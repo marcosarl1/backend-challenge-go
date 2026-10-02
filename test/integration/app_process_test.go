@@ -18,7 +18,7 @@ func fundWallet(t *testing.T, runner postgres.Runner, balance string) (walletID,
 	t.Helper()
 	ctx := context.Background()
 	playerID, _ = uuid.NewV7()
-	res, err := application.OpenWallet(ctx, runner, application.SystemClock{}, application.UUIDv7Generator{},
+	res, err := application.OpenWallet(ctx, runner, application.SystemClock{}, application.UUIDv7Generator{}, internalIdent(),
 		application.OpenWalletCommand{
 			PlayerID:       playerID,
 			InitialBalance: mustParseMoney(t, balance),
@@ -50,7 +50,7 @@ func processCmd(t *testing.T, walletID, playerID uuid.UUID, kind wager.Kind, amo
 
 func runProcess(t *testing.T, runner postgres.Runner, cmd application.ProcessCommand) *application.ProcessResult {
 	t.Helper()
-	res, err := application.Execute(context.Background(), runner, application.SystemClock{}, application.UUIDv7Generator{}, cmd)
+	res, err := application.Execute(context.Background(), runner, application.SystemClock{}, application.UUIDv7Generator{}, providerIdent("provider-a"), cmd)
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestProcessIdempotencyMismatch(t *testing.T) {
 	runProcess(t, runner, cmd)
 
 	cmd.Amount = mustParseMoney(t, "30.00")
-	_, err := application.Execute(context.Background(), runner, application.SystemClock{}, application.UUIDv7Generator{}, cmd)
+	_, err := application.Execute(context.Background(), runner, application.SystemClock{}, application.UUIDv7Generator{}, providerIdent("provider-a"), cmd)
 	if !errors.Is(err, application.ErrIdempotencyMismatch) {
 		t.Fatalf("erro = %v", err)
 	}
@@ -127,7 +127,7 @@ func TestProcessExternalIDReuse(t *testing.T) {
 	runProcess(t, runner, cmd)
 
 	cmd.IdempotencyKey = "k-outra-" + uuid.NewString()
-	_, err := application.Execute(context.Background(), runner, application.SystemClock{}, application.UUIDv7Generator{}, cmd)
+	_, err := application.Execute(context.Background(), runner, application.SystemClock{}, application.UUIDv7Generator{}, providerIdent("provider-a"), cmd)
 	if !errors.Is(err, application.ErrExternalIDReused) {
 		t.Fatalf("erro = %v", err)
 	}
@@ -183,7 +183,7 @@ func TestProcessWalletNotFound(t *testing.T) {
 	ghost, _ := uuid.NewV7()
 	cmd := processCmd(t, ghost, playerID, wager.KindBet, "10.00")
 
-	_, err := application.Execute(context.Background(), runner, application.SystemClock{}, application.UUIDv7Generator{}, cmd)
+	_, err := application.Execute(context.Background(), runner, application.SystemClock{}, application.UUIDv7Generator{}, providerIdent("provider-a"), cmd)
 	if !errors.Is(err, application.ErrNotFound) {
 		t.Fatalf("erro = %v", err)
 	}

@@ -9,6 +9,8 @@ var (
 	ErrInvalidInput = errors.New("aplicação: entrada inválida")
 	// ErrNotFound indica recurso inexistente (ou de outro dono).
 	ErrNotFound = errors.New("aplicação: não encontrado")
+	// ErrForbidden indica acesso negado.
+	ErrForbidden = errors.New("aplicação: acesso negado")
 	// ErrIdempotencyMismatch indica chave reutilizada com conteúdo diferente.
 	ErrIdempotencyMismatch = errors.New("aplicação: chave com outro conteúdo")
 	// ErrExternalIDReused indica id externo com outra chave.

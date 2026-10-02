@@ -44,8 +44,11 @@ type ProcessResult struct {
 	IdempotentReplay bool
 }
 
-// Execute roda o comando numa transação própria.
-func Execute(ctx context.Context, uow UnitOfWork, clock Clock, ids IDGenerator, cmd ProcessCommand) (*ProcessResult, error) {
+// Execute roda o comando numa transação própria. O provedor do token manda: só processa a própria operação.
+func Execute(ctx context.Context, uow UnitOfWork, clock Clock, ids IDGenerator, ident Identity, cmd ProcessCommand) (*ProcessResult, error) {
+	if err := requireProvider(ident, cmd.ProviderID); err != nil {
+		return nil, err
+	}
 	var out *ProcessResult
 	err := uow.Do(ctx, func(ctx context.Context, r Repositories) error {
 		res, err := ExecuteInTx(ctx, r, clock, ids, cmd)

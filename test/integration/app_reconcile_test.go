@@ -22,7 +22,7 @@ func TestReconcileConsistent(t *testing.T) {
 
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	rep, err := application.Reconcile(ctx, runner, logger, walletID)
+	rep, err := application.Reconcile(ctx, runner, logger, internalIdent(), walletID)
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestReconcileDivergence(t *testing.T) {
 
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	rep, err := application.Reconcile(ctx, runner, logger, walletID)
+	rep, err := application.Reconcile(ctx, runner, logger, internalIdent(), walletID)
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestReconcileDivergence(t *testing.T) {
 func TestReconcileNotFound(t *testing.T) {
 	runner := openRunner(t)
 	ghost, _ := uuid.NewV7()
-	if _, err := application.Reconcile(context.Background(), runner, nil, ghost); !errors.Is(err, application.ErrNotFound) {
+	if _, err := application.Reconcile(context.Background(), runner, nil, internalIdent(), ghost); !errors.Is(err, application.ErrNotFound) {
 		t.Fatalf("erro = %v", err)
 	}
 }

@@ -41,13 +41,16 @@ type TransactionView struct {
 	UpdatedAt           time.Time
 }
 
-// GetTransaction lê por id interno.
-func GetTransaction(ctx context.Context, uow UnitOfWork, id uuid.UUID) (*TransactionView, error) {
+// GetTransaction lê por id interno. Provedor só vê a própria transação (a de outro some como não encontrada); interno vê tudo.
+func GetTransaction(ctx context.Context, uow UnitOfWork, ident Identity, id uuid.UUID) (*TransactionView, error) {
 	var out *TransactionView
 	err := uow.Do(ctx, func(ctx context.Context, r Repositories) error {
 		tx, err := r.Wagers.FindByID(ctx, id)
 		if err != nil {
 			return mapNotFound(err, "transação")
+		}
+		if err := scopeTransaction(ident, tx.ProviderID()); err != nil {
+			return err
 		}
 		out = viewOf(tx)
 		return nil
@@ -58,13 +61,21 @@ func GetTransaction(ctx context.Context, uow UnitOfWork, id uuid.UUID) (*Transac
 	return out, nil
 }
 
-// GetTransactionByExternal lê por provedor + id externo.
-func GetTransactionByExternal(ctx context.Context, uow UnitOfWork, providerID, externalID string) (*TransactionView, error) {
+// GetTransactionByExternal lê por provedor + id externo. O provedor do caminho precisa ser o do token; a linha, do mesmo provedor.
+func GetTransactionByExternal(ctx context.Context, uow UnitOfWork, ident Identity, providerID, externalID string) (*TransactionView, error) {
+	if !ident.HasRole(RoleInternal) {
+		if err := requireProvider(ident, providerID); err != nil {
+			return nil, err
+		}
+	}
 	var out *TransactionView
 	err := uow.Do(ctx, func(ctx context.Context, r Repositories) error {
 		tx, err := r.Wagers.FindByProviderExternal(ctx, providerID, externalID)
 		if err != nil {
 			return mapNotFound(err, "transação")
+		}
+		if err := scopeTransaction(ident, tx.ProviderID()); err != nil {
+			return err
 		}
 		out = viewOf(tx)
 		return nil
@@ -73,6 +84,20 @@ func GetTransactionByExternal(ctx context.Context, uow UnitOfWork, providerID, e
 		return nil, err
 	}
 	return out, nil
+}
+
+// scopeTransaction esconde linha alheia como não encontrada (para não vazar nem a existência). Interno passa direto.
+func scopeTransaction(ident Identity, providerID string) error {
+	if ident.HasRole(RoleInternal) {
+		return nil
+	}
+	if !ident.HasRole(RoleProvider) || ident.ProviderID == "" {
+		return fmt.Errorf("%w: leitura de transação", ErrForbidden)
+	}
+	if ident.ProviderID != providerID {
+		return fmt.Errorf("%w: transação", ErrNotFound)
+	}
+	return nil
 }
 
 func mapNotFound(err error, what string) error {

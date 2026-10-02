@@ -36,7 +36,11 @@ type OpenWalletResult struct {
 }
 
 // OpenWallet abre a carteira e, com saldo inicial positivo, grava na mesma transação a carteira, a abertura processada, o lançamento de crédito e os dois eventos (operação processada e saldo alterado). Com zero, grava só a carteira — sem transação, sem lançamento, sem evento. Jogador e moeda repetidos conflitam.
-func OpenWallet(ctx context.Context, uow UnitOfWork, clock Clock, ids IDGenerator, cmd OpenWalletCommand) (*OpenWalletResult, error) {
+// OpenWallet abre a carteira e, com saldo inicial positivo, grava na mesma transação a carteira, a abertura processada, o lançamento de crédito e os dois eventos (operação processada e saldo alterado). Com zero, grava só a carteira — sem transação, sem lançamento, sem evento. Jogador e moeda repetidos conflitam. Só o serviço interno abre carteira.
+func OpenWallet(ctx context.Context, uow UnitOfWork, clock Clock, ids IDGenerator, ident Identity, cmd OpenWalletCommand) (*OpenWalletResult, error) {
+	if err := requireInternal(ident); err != nil {
+		return nil, err
+	}
 	if cmd.PlayerID == uuid.Nil {
 		return nil, fmt.Errorf("%w: jogador vazio", ErrInvalidInput)
 	}

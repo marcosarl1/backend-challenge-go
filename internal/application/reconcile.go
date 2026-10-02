@@ -21,7 +21,10 @@ type ReconciliationReport struct {
 }
 
 // Reconcile refaz o saldo a partir do ledger e compara com o guardado, tudo no mesmo objeto. Em divergência, registra no log (a métrica chega com a observabilidade) e sinaliza no relatório, sem encostar no saldo.
-func Reconcile(ctx context.Context, uow UnitOfWork, logger *slog.Logger, walletID uuid.UUID) (*ReconciliationReport, error) {
+func Reconcile(ctx context.Context, uow UnitOfWork, logger *slog.Logger, ident Identity, walletID uuid.UUID) (*ReconciliationReport, error) {
+	if err := requireInternal(ident); err != nil {
+		return nil, err
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}

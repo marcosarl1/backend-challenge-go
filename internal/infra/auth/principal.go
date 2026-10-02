@@ -4,6 +4,8 @@ import (
 	"errors"
 	"slices"
 	"time"
+
+	"github.com/marcosarl1/backend-challenge-go/internal/application"
 )
 
 var (
@@ -34,4 +36,9 @@ type Principal struct {
 // HasRole diz se a identidade tem o papel.
 func (p *Principal) HasRole(role string) bool {
 	return slices.Contains(p.Roles, role)
+}
+
+// Identity converte para o formato que os casos de uso enxergam.
+func (p *Principal) Identity() application.Identity {
+	return application.Identity{ProviderID: p.ProviderID, Roles: append([]string(nil), p.Roles...)}
 }

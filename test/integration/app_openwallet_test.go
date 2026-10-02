@@ -99,7 +99,7 @@ func TestOpenWalletWithMovement(t *testing.T) {
 	player, _ := uuid.NewV7()
 	cmd := openCmd(player, mustParseMoney(t, "1000.00"))
 
-	res, err := application.OpenWallet(ctx, runner, application.SystemClock{}, application.UUIDv7Generator{}, cmd)
+	res, err := application.OpenWallet(ctx, runner, application.SystemClock{}, application.UUIDv7Generator{}, internalIdent(), cmd)
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestOpenWalletZero(t *testing.T) {
 	}
 	cmd := openCmd(player, zero)
 
-	res, err := application.OpenWallet(ctx, runner, application.SystemClock{}, application.UUIDv7Generator{}, cmd)
+	res, err := application.OpenWallet(ctx, runner, application.SystemClock{}, application.UUIDv7Generator{}, internalIdent(), cmd)
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -134,10 +134,10 @@ func TestOpenWalletDuplicate(t *testing.T) {
 	ctx := context.Background()
 	player, _ := uuid.NewV7()
 	cmd := openCmd(player, mustParseMoney(t, "10.00"))
-	if _, err := application.OpenWallet(ctx, runner, application.SystemClock{}, application.UUIDv7Generator{}, cmd); err != nil {
+	if _, err := application.OpenWallet(ctx, runner, application.SystemClock{}, application.UUIDv7Generator{}, internalIdent(), cmd); err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
-	_, err := application.OpenWallet(ctx, runner, application.SystemClock{}, application.UUIDv7Generator{}, cmd)
+	_, err := application.OpenWallet(ctx, runner, application.SystemClock{}, application.UUIDv7Generator{}, internalIdent(), cmd)
 	if !errors.Is(err, application.ErrWalletExists) {
 		t.Fatalf("duplicata erro = %v", err)
 	}
