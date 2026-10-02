@@ -9,13 +9,18 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/marcosarl1/backend-challenge-go/internal/application"
 	"github.com/marcosarl1/backend-challenge-go/internal/infra/auth"
+	"github.com/marcosarl1/backend-challenge-go/internal/infra/httpapi"
 )
 
 func keycloakURL(t *testing.T) string {
@@ -133,6 +138,13 @@ func TestAuthExpired(t *testing.T) {
 	v := testVerifier(t, "wagering-api").WithLeeway(time.Second)
 	if _, err := v.Authenticate(ctx, raw); !errors.Is(err, auth.ErrExpired) {
 		t.Fatalf("vencido = %v", err)
+	}
+	// A mesma credencial vencida precisa ser recusada antes de consultar o banco.
+	srv := httptest.NewServer(httpapi.New(openRunner(t), v, application.SystemClock{}, application.UUIDv7Generator{}).Handler())
+	t.Cleanup(srv.Close)
+	status, body, headers := doJSON(t, http.MethodGet, srv.URL+"/wallets/"+uuid.NewString(), raw, nil, nil)
+	if status != http.StatusUnauthorized || body["code"] != "UNAUTHENTICATED" || headers.Get("WWW-Authenticate") != "Bearer" {
+		t.Fatalf("HTTP com token vencido = %d %v %v", status, body, headers)
 	}
 }
 
