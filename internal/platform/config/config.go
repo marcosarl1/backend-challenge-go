@@ -1,6 +1,10 @@
 package config
 
 import (
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -29,6 +33,7 @@ type Config struct {
 	RetryBatch      int
 	RetryInterval   time.Duration
 	ShutdownTimeout time.Duration
+	loadErr         error
 }
 
 // Load lê o ambiente (padrões = compose local).
@@ -50,7 +55,73 @@ func Load() Config {
 		RetryBatch:      envInt("RETRY_BATCH", 10),
 		RetryInterval:   envDuration("RETRY_INTERVAL", 5*time.Second),
 		ShutdownTimeout: envDuration("SHUTDOWN_TIMEOUT", 15*time.Second),
+		loadErr: errors.Join(
+			invalidIntEnv("CONSUMER_WORKERS"), invalidDurationEnv("CONSUMER_POLL"),
+			invalidIntEnv("OUTBOX_BATCH"), invalidDurationEnv("OUTBOX_INTERVAL"),
+			invalidIntEnv("RETRY_BATCH"), invalidDurationEnv("RETRY_INTERVAL"),
+			invalidDurationEnv("SHUTDOWN_TIMEOUT"),
+		),
 	}
+}
+
+// Validate confere os valores que controlam inicialização e encerramento.
+func (c Config) Validate() error {
+	var invalid []error
+	if c.loadErr != nil {
+		invalid = append(invalid, c.loadErr)
+	}
+	if _, _, err := net.SplitHostPort(c.HTTPAddr); err != nil {
+		invalid = append(invalid, fmt.Errorf("HTTP_ADDR inválido: %w", err))
+	}
+	if parsed, err := url.Parse(c.DatabaseURL); err != nil || parsed.Scheme != "postgres" && parsed.Scheme != "postgresql" || parsed.Host == "" {
+		invalid = append(invalid, errors.New("DATABASE_URL deve ser uma URL PostgreSQL válida"))
+	}
+	if !validURL(c.SQSEndpoint) {
+		invalid = append(invalid, errors.New("SQS_ENDPOINT deve ser uma URL HTTP ou HTTPS válida"))
+	}
+	if c.SQSRegion == "" || !validURL(c.OIDCIssuer) || !validURL(c.OIDCJWKSURL) || c.OIDCAudience == "" {
+		invalid = append(invalid, errors.New("região SQS e configuração OIDC são obrigatórias"))
+	}
+	if c.ConsumerName == "" || c.ConsumerWorkers < 1 || c.ConsumerPoll <= 0 {
+		invalid = append(invalid, errors.New("configuração do consumidor SQS inválida"))
+	}
+	if c.OutboxOwner == "" || c.OutboxBatch < 1 || c.OutboxInterval <= 0 {
+		invalid = append(invalid, errors.New("configuração do publicador da outbox inválida"))
+	}
+	if c.RetryBatch < 1 || c.RetryInterval <= 0 || c.ShutdownTimeout <= 0 {
+		invalid = append(invalid, errors.New("lotes e prazos de workers devem ser positivos"))
+	}
+	return errors.Join(invalid...)
+}
+
+// invalidIntEnv identifica uma variável inteira definida com formato inválido.
+func invalidIntEnv(key string) error {
+	value, exists := os.LookupEnv(key)
+	if !exists || value == "" {
+		return nil
+	}
+	if _, err := strconv.Atoi(value); err != nil {
+		return fmt.Errorf("%s inválido: %w", key, err)
+	}
+	return nil
+}
+
+// invalidDurationEnv identifica uma variável de duração definida com formato inválido.
+func invalidDurationEnv(key string) error {
+	value, exists := os.LookupEnv(key)
+	if !exists || value == "" {
+		return nil
+	}
+	if _, err := time.ParseDuration(value); err != nil {
+		return fmt.Errorf("%s inválido: %w", key, err)
+	}
+	return nil
+}
+
+// validURL aceita somente URLs HTTP(S) com host.
+func validURL(raw string) bool {
+	parsed, err := url.ParseRequestURI(raw)
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 func env(key, fallback string) string {

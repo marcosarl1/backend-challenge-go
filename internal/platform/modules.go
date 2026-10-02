@@ -2,8 +2,12 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -81,14 +85,20 @@ var WorkersModule = fx.Module("workers",
 )
 
 func newPool(lifecycle fx.Lifecycle, cfg config.Config) (*pgxpool.Pool, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("validando configuração do pool: %w", err)
+	}
 	pool, err := postgres.Connect(context.Background(), cfg.DatabaseURL)
 	if err != nil {
 		return nil, err
 	}
-	lifecycle.Append(fx.Hook{OnStop: func(context.Context) error {
-		pool.Close()
-		return nil
-	}})
+	lifecycle.Append(fx.Hook{
+		OnStart: func(context.Context) error { return nil },
+		OnStop: func(context.Context) error {
+			pool.Close()
+			return nil
+		},
+	})
 	return pool, nil
 }
 
@@ -97,6 +107,9 @@ func newApplicationUnitOfWork(runner postgres.Runner) application.UnitOfWork {
 }
 
 func newSQSClient(cfg config.Config) (*sqsinfra.Client, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("validando configuração do SQS: %w", err)
+	}
 	return sqsinfra.NewClient(context.Background(), cfg.SQSEndpoint, cfg.SQSRegion)
 }
 
@@ -106,7 +119,10 @@ type queueURLs struct {
 	events       string
 }
 
-func newQueueURLs(client *sqsinfra.Client) (queueURLs, error) {
+func newQueueURLs(client *sqsinfra.Client, cfg config.Config) (queueURLs, error) {
+	if err := cfg.Validate(); err != nil {
+		return queueURLs{}, fmt.Errorf("validando configuração das filas: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	transactions, err := client.ResolveQueue(ctx, sqsinfra.MainQueue)
@@ -129,6 +145,9 @@ func newSQSHealthChecker(client *sqsinfra.Client) httpapi.HealthChecker {
 }
 
 func newVerifier(cfg config.Config) (*auth.Verifier, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("validando configuração OIDC: %w", err)
+	}
 	return auth.NewVerifier(context.Background(), cfg.OIDCIssuer, cfg.OIDCJWKSURL, cfg.OIDCAudience)
 }
 
@@ -165,11 +184,132 @@ func newPendingWorker(cfg config.Config, uow application.UnitOfWork, clock appli
 	return pending.NewWorker(uow, clock, ids, cfg.RetryBatch, cfg.RetryInterval)
 }
 
-func registerComponents(server *http.Server, consumer *sqsinfra.Consumer, publisher *outbox.Publisher, retry *pending.Worker) error {
+// runtimeParams reúne as dependências do ciclo de vida da aplicação.
+type runtimeParams struct {
+	fx.In
+	Lifecycle fx.Lifecycle
+	Shutdown  fx.Shutdowner
+	Server    *http.Server
+	Checks    []httpapi.HealthChecker `group:"health"`
+	Consumer  *sqsinfra.Consumer
+	Publisher *outbox.Publisher
+	Retry     *pending.Worker
+	Config    config.Config
+}
+
+// registerComponents conecta os serviços gerenciados ao lifecycle do Fx.
+func registerComponents(p runtimeParams) error {
+	server, consumer, publisher, retry := p.Server, p.Consumer, p.Publisher, p.Retry
 	if server == nil || server.Handler == nil || consumer == nil || publisher == nil || retry == nil {
 		return fmt.Errorf("registrando componentes: dependência ausente")
 	}
+	_, err := registerLifecycle(p.Lifecycle, p.Shutdown, server, p.Checks, p.Config,
+		componentRunner{name: "consumidor SQS", run: consumer.Run},
+		componentRunner{name: "publicador da outbox", run: func(ctx context.Context) error {
+			return publisher.Run(ctx, p.Config.OutboxInterval)
+		}},
+		componentRunner{name: "retomada de pendências", run: retry.Run},
+	)
+	return err
+}
+
+// componentRunner representa um loop iniciado e cancelado pelo runtime.
+type componentRunner struct {
+	name string
+	run  func(context.Context) error
+}
+
+// registerLifecycle instala os hooks que iniciam e encerram o servidor e os workers.
+func registerLifecycle(lifecycle fx.Lifecycle, shutdown fx.Shutdowner, server *http.Server, checks []httpapi.HealthChecker, cfg config.Config, runners ...componentRunner) (*managedRuntime, error) {
+	if server == nil || server.Handler == nil || shutdown == nil {
+		return nil, fmt.Errorf("registrando lifecycle: dependência ausente")
+	}
+	managed := &managedRuntime{server: server, checks: checks, config: cfg, shutdown: shutdown, runners: runners}
+	lifecycle.Append(fx.Hook{OnStart: managed.start, OnStop: managed.stop})
+	return managed, nil
+}
+
+// managedRuntime coordena os componentes durante o start e o shutdown.
+type managedRuntime struct {
+	server   *http.Server
+	checks   []httpapi.HealthChecker
+	config   config.Config
+	shutdown fx.Shutdowner
+	runners  []componentRunner
+	cancel   context.CancelFunc
+	listener net.Listener
+	workers  sync.WaitGroup
+}
+
+// start valida dependências, abre o listener e inicia os componentes gerenciados.
+func (r *managedRuntime) start(ctx context.Context) error {
+	if err := r.config.Validate(); err != nil {
+		return fmt.Errorf("validando configuração: %w", err)
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for _, check := range r.checks {
+		if err := check.Check(checkCtx); err != nil {
+			return fmt.Errorf("dependência %s indisponível: %w", check.Name(), err)
+		}
+	}
+	listener, err := net.Listen("tcp", r.server.Addr)
+	if err != nil {
+		return fmt.Errorf("abrindo listener HTTP: %w", err)
+	}
+	r.listener = listener
+	runCtx, stop := context.WithCancel(context.Background())
+	r.cancel = stop
+	r.launch(runCtx, componentRunner{name: "servidor HTTP", run: func(context.Context) error {
+		err := r.server.Serve(listener)
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}})
+	for _, runner := range r.runners {
+		r.launch(runCtx, runner)
+	}
 	return nil
+}
+
+// launch executa um componente e solicita o encerramento se ele falhar.
+func (r *managedRuntime) launch(ctx context.Context, runner componentRunner) {
+	r.workers.Add(1)
+	go func() {
+		defer r.workers.Done()
+		if err := runner.run(ctx); err != nil && ctx.Err() == nil {
+			slog.ErrorContext(ctx, "componente encerrou com falha", "component", runner.name, "error", err)
+			if shutdownErr := r.shutdown.Shutdown(fx.ExitCode(1)); shutdownErr != nil {
+				slog.ErrorContext(ctx, "solicitação de encerramento falhou", "error", shutdownErr)
+			}
+		}
+	}()
+}
+
+// stop interrompe entradas, cancela os workers e aguarda seu término.
+func (r *managedRuntime) stop(ctx context.Context) error {
+	var stopErr error
+	if r.server != nil {
+		stopErr = r.server.Shutdown(ctx)
+		if stopErr != nil {
+			stopErr = errors.Join(stopErr, r.server.Close())
+		}
+	}
+	if r.cancel != nil {
+		r.cancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		r.workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		stopErr = errors.Join(stopErr, ctx.Err())
+	}
+	return stopErr
 }
 
 // Validate verifica se o grafo de dependências está completo.

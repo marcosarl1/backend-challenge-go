@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/marcosarl1/backend-challenge-go/internal/application"
 )
@@ -105,7 +106,7 @@ func (c *Consumer) handle(ctx context.Context, msg Received) {
 		// Transitório: solta com espera crescente pela contagem de recebimentos; esgotada, o redrive leva para a DLQ sozinho.
 		slog.ErrorContext(ctx, "consumidor: soltando para retry",
 			"messageId", msg.MessageID, "body", firstBytes(msg.Body, 120), "error", fmt.Sprintf("%#v", err))
-		if rerr := c.queues.Release(ctx, c.queueURL, msg.ReceiptHandle, backoffDelay(msg.ReceiveCount)); rerr != nil {
+		if rerr := c.release(ctx, msg, backoffDelay(msg.ReceiveCount)); rerr != nil {
 			slog.ErrorContext(ctx, "consumidor: soltura falhou", "messageId", msg.MessageID, "error", rerr)
 		}
 		return
@@ -116,6 +117,11 @@ func (c *Consumer) handle(ctx context.Context, msg Received) {
 	}
 	if derr := c.queues.Delete(ctx, c.queueURL, msg.ReceiptHandle); derr != nil {
 		slog.ErrorContext(ctx, "consumidor: delete falhou", "messageId", msg.MessageID, "error", derr)
+		if ctx.Err() != nil {
+			if rerr := c.release(ctx, msg, 0); rerr != nil {
+				slog.ErrorContext(ctx, "consumidor: soltura após cancelamento falhou", "messageId", msg.MessageID, "error", rerr)
+			}
+		}
 	}
 }
 
@@ -123,11 +129,32 @@ func (c *Consumer) handle(ctx context.Context, msg Received) {
 func (c *Consumer) toDLQ(ctx context.Context, msg Received, reason string) {
 	if serr := c.queues.SendDLQ(ctx, c.dlqURL, msg.Body, reason, msg.MessageID); serr != nil {
 		slog.ErrorContext(ctx, "consumidor: envio à DLQ falhou", "messageId", msg.MessageID, "error", serr)
+		if ctx.Err() != nil {
+			if rerr := c.release(ctx, msg, 0); rerr != nil {
+				slog.ErrorContext(ctx, "consumidor: soltura após cancelamento falhou", "messageId", msg.MessageID, "error", rerr)
+			}
+		}
 		return
 	}
 	if derr := c.queues.Delete(ctx, c.queueURL, msg.ReceiptHandle); derr != nil {
 		slog.ErrorContext(ctx, "consumidor: delete após DLQ falhou", "messageId", msg.MessageID, "error", derr)
+		if ctx.Err() != nil {
+			if rerr := c.release(ctx, msg, 0); rerr != nil {
+				slog.ErrorContext(ctx, "consumidor: soltura após cancelamento falhou", "messageId", msg.MessageID, "error", rerr)
+			}
+		}
 	}
+}
+
+// release libera a mensagem e usa um prazo independente se o trabalho foi cancelado.
+func (c *Consumer) release(ctx context.Context, msg Received, delay int) error {
+	releaseCtx := ctx
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		releaseCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+	}
+	return c.queues.Release(releaseCtx, c.queueURL, msg.ReceiptHandle, delay)
 }
 
 // backoffDelay espera 2^(n-1) segundos até o teto de um minuto.

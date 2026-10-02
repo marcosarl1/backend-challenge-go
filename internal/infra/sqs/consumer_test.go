@@ -1,6 +1,7 @@
 package sqs
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -19,6 +20,38 @@ func TestBackoffDelay(t *testing.T) {
 	}
 	if got := backoffDelay(0); got != 1 {
 		t.Fatalf("zero = %d", got)
+	}
+}
+
+type releaseQueue struct {
+	ctx   context.Context
+	err   error
+	delay int
+}
+
+func (q *releaseQueue) Receive(context.Context, string, int, int) ([]Received, error) {
+	return nil, nil
+}
+func (q *releaseQueue) Delete(context.Context, string, string) error { return nil }
+func (q *releaseQueue) Release(ctx context.Context, _, _ string, delay int) error {
+	q.ctx, q.err, q.delay = ctx, ctx.Err(), delay
+	return nil
+}
+func (q *releaseQueue) SendDLQ(context.Context, string, string, string, string) error { return nil }
+
+func TestReleaseUsesIndependentContextAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	queues := &releaseQueue{}
+	consumer := &Consumer{queues: queues, queueURL: "queue"}
+	if err := consumer.release(ctx, Received{ReceiptHandle: "receipt"}, 0); err != nil {
+		t.Fatalf("release() = %v", err)
+	}
+	if queues.err != nil {
+		t.Fatalf("contexto de liberação cancelado: %v", queues.err)
+	}
+	if queues.delay != 0 {
+		t.Fatalf("atraso = %d, esperado 0", queues.delay)
 	}
 }
 
