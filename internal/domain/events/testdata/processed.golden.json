@@ -1,0 +1,27 @@
+{
+  "eventId": "0192f298-345e-7e38-af88-e43f851a819d",
+  "eventType": "WagerTransactionProcessed",
+  "aggregateId": "0192f298-345e-7e38-af88-e43f851a819d",
+  "correlationId": "corr-1",
+  "occurredAt": "2026-09-08T12:00:00Z",
+  "version": 1,
+  "data": {
+    "transactionId": "0192f298-345e-7e38-af88-e43f851a819d",
+    "providerId": "provider-a",
+    "externalTransactionId": "transaction-123",
+    "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
+    "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+    "roundId": "round-987",
+    "gameId": "fortune-chimp",
+    "kind": "BET",
+    "money": {
+      "amount": "25.00",
+      "currency": "BRL"
+    },
+    "resultBalance": {
+      "amount": "975.00",
+      "currency": "BRL"
+    },
+    "resultWalletVersion": 2
+  }
+}

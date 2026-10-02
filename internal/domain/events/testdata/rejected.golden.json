@@ -1,0 +1,30 @@
+{
+  "eventId": "0192f299-345e-7e38-af88-e43f851a819e",
+  "eventType": "WagerTransactionRejected",
+  "aggregateId": "0192f299-345e-7e38-af88-e43f851a819e",
+  "correlationId": "corr-2",
+  "causationId": "cause-1",
+  "occurredAt": "2026-09-08T12:00:00Z",
+  "version": 1,
+  "data": {
+    "transactionId": "0192f299-345e-7e38-af88-e43f851a819e",
+    "providerId": "provider-a",
+    "externalTransactionId": "transaction-124",
+    "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
+    "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+    "roundId": "round-987",
+    "gameId": "fortune-chimp",
+    "kind": "BET",
+    "money": {
+      "amount": "80.00",
+      "currency": "BRL"
+    },
+    "resultBalance": {
+      "amount": "20.00",
+      "currency": "BRL"
+    },
+    "resultWalletVersion": 2,
+    "failureCode": "INSUFFICIENT_FUNDS",
+    "failureDetail": "saldo 20.00 menor que aposta 80.00"
+  }
+}

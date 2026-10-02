@@ -1,0 +1,18 @@
+{
+  "eventId": "0192f29b-345e-7e38-af88-e43f851a81a0",
+  "eventType": "WagerTransactionPendingReference",
+  "aggregateId": "0192f29b-345e-7e38-af88-e43f851a81a0",
+  "correlationId": "corr-3",
+  "occurredAt": "2026-09-08T12:00:00Z",
+  "version": 1,
+  "data": {
+    "transactionId": "0192f29b-345e-7e38-af88-e43f851a81a0",
+    "providerId": "provider-a",
+    "externalTransactionId": "refund-1",
+    "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
+    "referenceExternalTransactionId": "transaction-123",
+    "attempts": 1,
+    "nextAttemptAt": "2026-09-08T12:00:01Z",
+    "expiresAt": "2026-09-08T12:10:00Z"
+  }
+}
