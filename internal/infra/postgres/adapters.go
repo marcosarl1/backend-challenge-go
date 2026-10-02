@@ -132,7 +132,8 @@ func (a outboxAdapter) Insert(ctx context.Context, e application.OutboxEvent, ne
 		ID: e.ID, AggregateType: e.AggregateType, AggregateID: e.AggregateID,
 		EventType: e.EventType, EventVersion: e.EventVersion, OrderingKey: e.OrderingKey,
 		CorrelationID: e.CorrelationID, CausationID: e.CausationID,
-		Payload: e.Payload, OccurredAt: e.OccurredAt,
+		Traceparent: e.Traceparent,
+		Payload:     e.Payload, OccurredAt: e.OccurredAt,
 	}, nextAttempt)
 }
 
@@ -147,7 +148,8 @@ func (a outboxAdapter) Claim(ctx context.Context, owner string, now, leaseUntil 
 			ID: e.ID, AggregateType: e.AggregateType, AggregateID: e.AggregateID,
 			EventType: e.EventType, EventVersion: e.EventVersion, OrderingKey: e.OrderingKey,
 			CorrelationID: e.CorrelationID, CausationID: e.CausationID,
-			Payload: e.Payload, OccurredAt: e.OccurredAt, Attempts: e.Attempts,
+			Traceparent: e.Traceparent,
+			Payload:     e.Payload, OccurredAt: e.OccurredAt, Attempts: e.Attempts,
 		})
 	}
 	return out, nil

@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/marcosarl1/backend-challenge-go/internal/platform/observability"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestRecoverMiddleware(t *testing.T) {
@@ -52,5 +54,23 @@ func TestHTTPServerTimeouts(t *testing.T) {
 	srv := NewHTTPServer(http.NotFoundHandler(), "127.0.0.1:0")
 	if srv.ReadHeaderTimeout <= 0 || srv.ReadTimeout <= 0 || srv.WriteTimeout <= 0 || srv.IdleTimeout <= 0 {
 		t.Fatalf("prazos zerados: %+v", srv)
+	}
+}
+
+func TestHTTPTraceUsesIncomingParent(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer provider.Shutdown(t.Context())
+	server := NewWithTracing(nil, nil, nil, nil, nil, nil, observability.NewTracingWithProvider(provider))
+	request := httptest.NewRequest(http.MethodGet, "/health/live", nil)
+	request.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	recorderHTTP := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorderHTTP, request)
+	if recorderHTTP.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorderHTTP.Code)
+	}
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Parent().SpanID().String() != "00f067aa0ba902b7" {
+		t.Fatalf("span HTTP não herdou traceparent: %+v", spans)
 	}
 }

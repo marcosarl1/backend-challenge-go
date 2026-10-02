@@ -12,6 +12,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	sqssdk "github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/marcosarl1/backend-challenge-go/internal/platform/observability"
 )
 
 // Filas do serviço.
@@ -26,6 +30,7 @@ type Client struct {
 	endpoint string
 	inner    *sqssdk.Client
 	urls     map[string]string
+	tracing  *observability.Tracing
 }
 
 // NewClient monta o cliente para o endpoint (ex.: http://localhost:4566).
@@ -46,6 +51,16 @@ func NewClient(ctx context.Context, endpoint, region string) (*Client, error) {
 		o.Region = region
 		o.BaseEndpoint = aws.String(endpoint)
 	})}, nil
+}
+
+// NewClientWithTracing monta o cliente com spans para o envio de mensagens.
+func NewClientWithTracing(ctx context.Context, endpoint, region string, tracing *observability.Tracing) (*Client, error) {
+	client, err := NewClient(ctx, endpoint, region)
+	if err != nil {
+		return nil, err
+	}
+	client.tracing = tracing
+	return client, nil
 }
 
 // Name identifica o cheque de saúde.
@@ -85,13 +100,24 @@ type Sent struct {
 
 // Send publica na fila FIFO com grupo e deduplicação explícitos.
 func (c *Client) Send(ctx context.Context, queueURL, body, groupID, dedupID string) (Sent, error) {
+	if c.tracing != nil {
+		var span trace.Span
+		ctx, span = c.tracing.Start(ctx, "sqs.send", trace.SpanKindProducer)
+		defer span.End()
+	}
+	attributes := map[string]types.MessageAttributeValue{}
+	if parent := observability.InjectParent(ctx); parent != "" {
+		attributes["traceparent"] = types.MessageAttributeValue{DataType: aws.String("String"), StringValue: aws.String(parent)}
+	}
 	out, err := c.inner.SendMessage(ctx, &sqssdk.SendMessageInput{
 		QueueUrl:               aws.String(queueURL),
 		MessageBody:            aws.String(body),
 		MessageGroupId:         aws.String(groupID),
 		MessageDeduplicationId: aws.String(dedupID),
+		MessageAttributes:      attributes,
 	})
 	if err != nil {
+		trace.SpanFromContext(ctx).SetStatus(codes.Error, "send failed")
 		return Sent{}, fmt.Errorf("sqs: enviando: %w", err)
 	}
 	return Sent{MessageID: aws.ToString(out.MessageId)}, nil
@@ -100,6 +126,7 @@ func (c *Client) Send(ctx context.Context, queueURL, body, groupID, dedupID stri
 // Received é uma mensagem com o recibo para confirmar ou soltar.
 type Received struct {
 	MessageID     string
+	Traceparent   string
 	ReceiptHandle string
 	Body          string
 	ReceiveCount  int
@@ -108,10 +135,11 @@ type Received struct {
 // Receive busca até max mensagens com espera longa.
 func (c *Client) Receive(ctx context.Context, queueURL string, max, waitSeconds int) ([]Received, error) {
 	out, err := c.inner.ReceiveMessage(ctx, &sqssdk.ReceiveMessageInput{
-		QueueUrl:            aws.String(queueURL),
-		MaxNumberOfMessages: int32(max),
-		WaitTimeSeconds:     int32(waitSeconds),
-		AttributeNames:      []types.QueueAttributeName{types.QueueAttributeName("ApproximateReceiveCount")},
+		QueueUrl:              aws.String(queueURL),
+		MaxNumberOfMessages:   int32(max),
+		WaitTimeSeconds:       int32(waitSeconds),
+		AttributeNames:        []types.QueueAttributeName{types.QueueAttributeName("ApproximateReceiveCount")},
+		MessageAttributeNames: []string{"traceparent"},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sqs: recebendo: %w", err)
@@ -125,6 +153,7 @@ func (c *Client) Receive(ctx context.Context, queueURL string, max, waitSeconds 
 		messages = append(messages, Received{
 			MessageID: aws.ToString(m.MessageId), ReceiptHandle: aws.ToString(m.ReceiptHandle),
 			Body: aws.ToString(m.Body), ReceiveCount: count,
+			Traceparent: aws.ToString(m.MessageAttributes["traceparent"].StringValue),
 		})
 	}
 	return messages, nil

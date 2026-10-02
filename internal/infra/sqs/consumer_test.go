@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	"github.com/marcosarl1/backend-challenge-go/internal/application"
 	"github.com/marcosarl1/backend-challenge-go/internal/platform/observability"
 )
@@ -133,6 +136,22 @@ func TestConsumerDLQLogOmitsInvalidBody(t *testing.T) {
 		}
 	}
 	checkMetric(t, metrics, "wager_dlq_total 1")
+}
+
+func TestConsumerRestoresMessageTraceparent(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer provider.Shutdown(t.Context())
+	tracing := observability.NewTracingWithProvider(provider)
+	consumer := NewConsumerWithTracing(&releaseQueue{}, "queue", "dlq", "consumer", failingUnitOfWork{}, nil, nil, 1, 1, nil, nil, tracing)
+	consumer.handle(context.Background(), Received{
+		MessageID: "sqs-1", ReceiptHandle: "receipt", Body: validEnvelope,
+		Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+	})
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Parent().SpanID().String() != "00f067aa0ba902b7" {
+		t.Fatalf("span SQS não herdou traceparent: %+v", spans)
+	}
 }
 
 // checkMetric confere uma amostra emitida pelo handler Prometheus.

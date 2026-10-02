@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/marcosarl1/backend-challenge-go/internal/platform/observability"
 )
 
 // OutboxEvent é o registro pendente de publicação: identidade estável (a republicação mantém o mesmo id), payload como retrato e controle de tentativa e arrendamento para disputar entre publicadores.
@@ -18,6 +20,7 @@ type OutboxEvent struct {
 	EventVersion  int
 	OrderingKey   string
 	CorrelationID string
+	Traceparent   string
 	CausationID   string
 	Payload       []byte
 	OccurredAt    time.Time
@@ -33,12 +36,15 @@ func (OutboxStore) Insert(ctx context.Context, db DBTX, e OutboxEvent, nextAttem
 	if e.CausationID != "" {
 		causation = e.CausationID
 	}
+	if e.Traceparent == "" {
+		e.Traceparent = observability.InjectParent(ctx)
+	}
 	_, err := db.Exec(ctx, `INSERT INTO outbox_events
 		(id, aggregate_type, aggregate_id, event_type, event_version, ordering_key,
-		 correlation_id, causation_id, payload, occurred_at, next_attempt_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		 correlation_id, causation_id, payload, occurred_at, next_attempt_at, traceparent)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		toPGUUID(e.ID), e.AggregateType, toPGUUID(e.AggregateID), e.EventType, e.EventVersion,
-		e.OrderingKey, e.CorrelationID, causation, e.Payload, e.OccurredAt, nextAttempt)
+		e.OrderingKey, e.CorrelationID, causation, e.Payload, e.OccurredAt, nextAttempt, e.Traceparent)
 	if err != nil {
 		return fmt.Errorf("enfileirando evento: %w", err)
 	}
@@ -53,7 +59,7 @@ func (OutboxStore) Claim(ctx context.Context, db DBTX, owner string, now, leaseU
 			  AND (lease_until IS NULL OR lease_until < $3)
 			ORDER BY occurred_at LIMIT $4 FOR UPDATE SKIP LOCKED)
 		RETURNING id, aggregate_type, aggregate_id, event_type, event_version,
-			ordering_key, correlation_id, causation_id, payload, occurred_at, attempts`,
+			ordering_key, correlation_id, causation_id, payload, occurred_at, attempts, traceparent`,
 		owner, leaseUntil, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("reservando eventos: %w", err)
@@ -64,8 +70,9 @@ func (OutboxStore) Claim(ctx context.Context, db DBTX, owner string, now, leaseU
 		var e OutboxEvent
 		var id, agg pgtype.UUID
 		var causation *string
+		var traceparent *string
 		if err := rows.Scan(&id, &e.AggregateType, &agg, &e.EventType, &e.EventVersion,
-			&e.OrderingKey, &e.CorrelationID, &causation, &e.Payload, &e.OccurredAt, &e.Attempts); err != nil {
+			&e.OrderingKey, &e.CorrelationID, &causation, &e.Payload, &e.OccurredAt, &e.Attempts, &traceparent); err != nil {
 			return nil, fmt.Errorf("lendo evento: %w", err)
 		}
 		var err error
@@ -77,6 +84,9 @@ func (OutboxStore) Claim(ctx context.Context, db DBTX, owner string, now, leaseU
 		}
 		if causation != nil {
 			e.CausationID = *causation
+		}
+		if traceparent != nil {
+			e.Traceparent = *traceparent
 		}
 		out = append(out, e)
 	}

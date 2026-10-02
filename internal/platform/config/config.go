@@ -19,6 +19,7 @@ var Module = fx.Module("config", fx.Provide(Load))
 type Config struct {
 	HTTPAddr        string
 	MetricsAddr     string
+	OTLPEndpoint    string
 	DatabaseURL     string
 	SQSEndpoint     string
 	SQSRegion       string
@@ -42,6 +43,7 @@ func Load() Config {
 	return Config{
 		HTTPAddr:        env("HTTP_ADDR", ":8081"),
 		MetricsAddr:     env("METRICS_ADDR", "127.0.0.1:9090"),
+		OTLPEndpoint:    env("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 		DatabaseURL:     env("DATABASE_URL", "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable"),
 		SQSEndpoint:     env("SQS_ENDPOINT", "http://localhost:4566"),
 		SQSRegion:       env("SQS_REGION", "us-east-1"),
@@ -81,6 +83,9 @@ func (c Config) Validate() error {
 		} else if c.MetricsAddr == c.HTTPAddr {
 			invalid = append(invalid, errors.New("METRICS_ADDR deve usar porta separada de HTTP_ADDR"))
 		}
+	}
+	if c.OTLPEndpoint != "" && !validURL(c.OTLPEndpoint) {
+		invalid = append(invalid, errors.New("OTEL_EXPORTER_OTLP_ENDPOINT deve ser URL HTTP ou HTTPS válida"))
 	}
 	if parsed, err := url.Parse(c.DatabaseURL); err != nil || parsed.Scheme != "postgres" && parsed.Scheme != "postgresql" || parsed.Host == "" {
 		invalid = append(invalid, errors.New("DATABASE_URL deve ser uma URL PostgreSQL válida"))

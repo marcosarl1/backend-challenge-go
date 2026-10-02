@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/marcosarl1/backend-challenge-go/internal/platform/observability"
 )
@@ -66,6 +68,7 @@ func (c PingChecker) Check(ctx context.Context) error {
 type UnitOfWork struct {
 	pool    *pgxpool.Pool
 	metrics *observability.Metrics
+	tracing *observability.Tracing
 }
 
 // NewUnitOfWork monta a unidade sobre um pool aberto.
@@ -78,9 +81,19 @@ func NewUnitOfWorkWithMetrics(pool *pgxpool.Pool, metrics *observability.Metrics
 	return &UnitOfWork{pool: pool, metrics: metrics}
 }
 
+// NewUnitOfWorkWithTracing monta a unidade com métricas e spans da transação.
+func NewUnitOfWorkWithTracing(pool *pgxpool.Pool, metrics *observability.Metrics, tracing *observability.Tracing) *UnitOfWork {
+	return &UnitOfWork{pool: pool, metrics: metrics, tracing: tracing}
+}
+
 // Do executa fn dentro de uma transação e confirma no fim. Erro da função
 // desfaz tudo; erro transitório repete (limitado); o resto volta direto.
 func (u *UnitOfWork) Do(ctx context.Context, fn func(ctx context.Context, tx pgx.Tx) error) error {
+	if u.tracing != nil {
+		var span trace.Span
+		ctx, span = u.tracing.Start(ctx, "postgres.transaction", trace.SpanKindInternal)
+		defer span.End()
+	}
 	var err error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		err = u.once(ctx, fn)
@@ -92,6 +105,9 @@ func (u *UnitOfWork) Do(ctx context.Context, fn func(ctx context.Context, tx pgx
 			u.metrics.Conflict()
 		}
 		if Classify(err) != ClassTransient || attempt == maxAttempts {
+			if u.tracing != nil {
+				trace.SpanFromContext(ctx).SetStatus(codes.Error, "transaction failed")
+			}
 			return err
 		}
 		if u.metrics != nil {

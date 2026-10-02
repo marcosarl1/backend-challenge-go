@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/marcosarl1/backend-challenge-go/internal/application"
 	"github.com/marcosarl1/backend-challenge-go/internal/platform/observability"
 )
@@ -29,6 +31,7 @@ type Consumer struct {
 	ids          application.IDGenerator
 	logger       *slog.Logger
 	metrics      *observability.Metrics
+	tracing      *observability.Tracing
 	workers      int
 	pollSeconds  int
 }
@@ -45,6 +48,11 @@ func NewConsumerWithLogger(queues QueueOps, queueURL, dlqURL, consumerName strin
 
 // NewConsumerWithMetrics monta o consumidor com logs e métricas.
 func NewConsumerWithMetrics(queues QueueOps, queueURL, dlqURL, consumerName string, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, workers, pollSeconds int, logger *slog.Logger, metrics *observability.Metrics) *Consumer {
+	return NewConsumerWithTracing(queues, queueURL, dlqURL, consumerName, uow, clock, ids, workers, pollSeconds, logger, metrics, nil)
+}
+
+// NewConsumerWithTracing monta o consumidor com logs, métricas e spans.
+func NewConsumerWithTracing(queues QueueOps, queueURL, dlqURL, consumerName string, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, workers, pollSeconds int, logger *slog.Logger, metrics *observability.Metrics, tracing *observability.Tracing) *Consumer {
 	if workers < 1 {
 		workers = 1
 	}
@@ -56,7 +64,7 @@ func NewConsumerWithMetrics(queues QueueOps, queueURL, dlqURL, consumerName stri
 	}
 	return &Consumer{queues: queues, queueURL: queueURL, dlqURL: dlqURL,
 		consumerName: consumerName, uow: uow, clock: clock, ids: ids,
-		workers: workers, pollSeconds: pollSeconds, logger: logger, metrics: metrics}
+		workers: workers, pollSeconds: pollSeconds, logger: logger, metrics: metrics, tracing: tracing}
 }
 
 // Run puxa e aplica até o contexto acabar. Para de buscar ao cancelar e termina o lote em voo antes de voltar.
@@ -90,6 +98,12 @@ func (c *Consumer) Run(ctx context.Context) error {
 // handle trata uma mensagem: inválida vai para a DLQ com motivo; repetida com o mesmo conteúdo confirma sem reexecutar; com outro conteúdo é veneno e vai para a DLQ; o resto segue para o caso de uso na transação.
 
 func (c *Consumer) handle(ctx context.Context, msg Received) {
+	if c.tracing != nil {
+		ctx = observability.ExtractParent(ctx, msg.Traceparent)
+		var span trace.Span
+		ctx, span = c.tracing.Start(ctx, "sqs.consume", trace.SpanKindConsumer)
+		defer span.End()
+	}
 	started := time.Now()
 	if c.metrics != nil {
 		defer func() { c.metrics.Latency("sqs_process", time.Since(started)) }()

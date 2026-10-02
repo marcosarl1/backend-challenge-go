@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/marcosarl1/backend-challenge-go/internal/application"
 	"github.com/marcosarl1/backend-challenge-go/internal/domain/money"
@@ -27,6 +29,7 @@ type Server struct {
 	ids     application.IDGenerator
 	logger  *slog.Logger
 	metrics *observability.Metrics
+	tracing *observability.Tracing
 	checks  []HealthChecker
 }
 
@@ -48,10 +51,15 @@ func NewWithLogger(uow application.UnitOfWork, auth Authenticator, clock applica
 
 // NewWithMetrics monta o servidor com logs e métricas compartilhados pela aplicação.
 func NewWithMetrics(uow application.UnitOfWork, auth Authenticator, clock application.Clock, ids application.IDGenerator, logger *slog.Logger, metrics *observability.Metrics, checks ...HealthChecker) *Server {
+	return NewWithTracing(uow, auth, clock, ids, logger, metrics, nil, checks...)
+}
+
+// NewWithTracing monta o servidor com logs, métricas e spans HTTP.
+func NewWithTracing(uow application.UnitOfWork, auth Authenticator, clock application.Clock, ids application.IDGenerator, logger *slog.Logger, metrics *observability.Metrics, tracing *observability.Tracing, checks ...HealthChecker) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{uow: uow, auth: auth, clock: clock, ids: ids, logger: logger, metrics: metrics, checks: checks}
+	return &Server{uow: uow, auth: auth, clock: clock, ids: ids, logger: logger, metrics: metrics, tracing: tracing, checks: checks}
 }
 
 // NewHTTPServer monta o servidor HTTP com prazos: cabeçalho lento não prende
@@ -82,7 +90,21 @@ func (s *Server) Handler() http.Handler {
 	biz.HandleFunc("GET /wagering/transactions/{transactionId}", s.handleGetTransaction)
 	biz.HandleFunc("GET /providers/{providerId}/wagering/transactions/{externalTransactionId}", s.handleGetByExternal)
 	mux.Handle("/", s.withAuth(biz))
-	return s.withCorrelation(s.withRecover(mux))
+	return s.withTrace(s.withCorrelation(s.withRecover(mux)))
+}
+
+// withTrace restaura traceparent do cliente e abre o span de entrada HTTP.
+func (s *Server) withTrace(next http.Handler) http.Handler {
+	if s.tracing == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := s.tracing.ExtractHTTP(r.Context(), r.Header)
+		ctx, span := s.tracing.Start(ctx, "http.request", trace.SpanKindServer)
+		defer span.End()
+		span.SetAttributes(attribute.String("http.request.method", r.Method))
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // withCorrelation carrega ou gera o id de correlação (vai e volta no header,

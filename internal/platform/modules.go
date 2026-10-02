@@ -41,7 +41,7 @@ var Module = fx.Module("platform",
 // DBModule configura o pool e as verificações do PostgreSQL.
 var DBModule = fx.Module("db",
 	fx.Provide(newPool),
-	fx.Provide(postgres.NewUnitOfWorkWithMetrics),
+	fx.Provide(postgres.NewUnitOfWorkWithTracing),
 	fx.Provide(fx.Annotate(postgres.NewPingChecker,
 		fx.As(new(httpapi.HealthChecker)), fx.ResultTags(`group:"health"`))),
 )
@@ -106,11 +106,11 @@ func newApplicationUnitOfWork(runner postgres.Runner) application.UnitOfWork {
 	return runner
 }
 
-func newSQSClient(cfg config.Config) (*sqsinfra.Client, error) {
+func newSQSClient(cfg config.Config, tracing *observability.Tracing) (*sqsinfra.Client, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validando configuração do SQS: %w", err)
 	}
-	return sqsinfra.NewClient(context.Background(), cfg.SQSEndpoint, cfg.SQSRegion)
+	return sqsinfra.NewClientWithTracing(context.Background(), cfg.SQSEndpoint, cfg.SQSRegion, tracing)
 }
 
 type queueURLs struct {
@@ -163,23 +163,24 @@ type httpParams struct {
 	IDs     application.IDGenerator
 	Logger  *slog.Logger
 	Metrics *observability.Metrics
+	Tracing *observability.Tracing
 	Checks  []httpapi.HealthChecker `group:"health"`
 }
 
 func newHTTPHandler(p httpParams) http.Handler {
-	return httpapi.NewWithMetrics(p.UOW, p.Auth, p.Clock, p.IDs, p.Logger, p.Metrics, p.Checks...).Handler()
+	return httpapi.NewWithTracing(p.UOW, p.Auth, p.Clock, p.IDs, p.Logger, p.Metrics, p.Tracing, p.Checks...).Handler()
 }
 
 func newHTTPServer(handler http.Handler, cfg config.Config) *http.Server {
 	return httpapi.NewHTTPServer(handler, cfg.HTTPAddr)
 }
 
-func newConsumer(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, logger *slog.Logger, metrics *observability.Metrics) *sqsinfra.Consumer {
-	return sqsinfra.NewConsumerWithMetrics(client, urls.transactions, urls.dlq, cfg.ConsumerName, uow, clock, ids, cfg.ConsumerWorkers, int(cfg.ConsumerPoll.Seconds()), logger, metrics)
+func newConsumer(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, logger *slog.Logger, metrics *observability.Metrics, tracing *observability.Tracing) *sqsinfra.Consumer {
+	return sqsinfra.NewConsumerWithTracing(client, urls.transactions, urls.dlq, cfg.ConsumerName, uow, clock, ids, cfg.ConsumerWorkers, int(cfg.ConsumerPoll.Seconds()), logger, metrics, tracing)
 }
 
-func newOutboxPublisher(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, logger *slog.Logger, metrics *observability.Metrics) *outbox.Publisher {
-	return outbox.NewPublisherWithMetrics(outbox.ClientSender{Client: client}, urls.events, uow, clock, cfg.OutboxOwner, logger, metrics)
+func newOutboxPublisher(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, logger *slog.Logger, metrics *observability.Metrics, tracing *observability.Tracing) *outbox.Publisher {
+	return outbox.NewPublisherWithTracing(outbox.ClientSender{Client: client}, urls.events, uow, clock, cfg.OutboxOwner, logger, metrics, tracing)
 }
 
 func newPendingWorker(cfg config.Config, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, logger *slog.Logger) *pending.Worker {

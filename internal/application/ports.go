@@ -69,6 +69,7 @@ type OutboxEvent struct {
 	EventVersion  int
 	OrderingKey   string
 	CorrelationID string
+	Traceparent   string
 	CausationID   string
 	Payload       []byte
 	OccurredAt    time.Time
@@ -84,6 +85,7 @@ type OutboxClaim struct {
 	EventVersion  int
 	OrderingKey   string
 	CorrelationID string
+	Traceparent   string
 	CausationID   string
 	Payload       []byte
 	OccurredAt    time.Time

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/marcosarl1/backend-challenge-go/internal/application"
 	"github.com/marcosarl1/backend-challenge-go/internal/infra/sqs"
@@ -42,6 +44,7 @@ type Publisher struct {
 	maxDelay  time.Duration
 	logger    *slog.Logger
 	metrics   *observability.Metrics
+	tracing   *observability.Tracing
 
 	AfterPublish func(id uuid.UUID) error
 }
@@ -58,12 +61,17 @@ func NewPublisherWithLogger(queues Sender, eventsURL string, uow application.Uni
 
 // NewPublisherWithMetrics monta o publicador com logs e métricas.
 func NewPublisherWithMetrics(queues Sender, eventsURL string, uow application.UnitOfWork, clock application.Clock, owner string, logger *slog.Logger, metrics *observability.Metrics) *Publisher {
+	return NewPublisherWithTracing(queues, eventsURL, uow, clock, owner, logger, metrics, nil)
+}
+
+// NewPublisherWithTracing monta o publicador com logs, métricas e spans.
+func NewPublisherWithTracing(queues Sender, eventsURL string, uow application.UnitOfWork, clock application.Clock, owner string, logger *slog.Logger, metrics *observability.Metrics, tracing *observability.Tracing) *Publisher {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Publisher{queues: queues, eventsURL: eventsURL, uow: uow, clock: clock,
 		owner: owner, batchSize: 10, leaseFor: 30 * time.Second,
-		baseDelay: time.Second, maxDelay: time.Minute, logger: logger, metrics: metrics}
+		baseDelay: time.Second, maxDelay: time.Minute, logger: logger, metrics: metrics, tracing: tracing}
 }
 
 // Run publica lotes até o contexto acabar.
@@ -100,7 +108,12 @@ func (p *Publisher) RunOnce(ctx context.Context) (int, error) {
 	published := 0
 	for _, event := range claimed {
 		started := time.Now()
-		eventCtx := observability.WithFields(ctx,
+		eventCtx := observability.ExtractParent(ctx, event.Traceparent)
+		var span trace.Span
+		if p.tracing != nil {
+			eventCtx, span = p.tracing.Start(eventCtx, "outbox.publish", trace.SpanKindInternal)
+		}
+		eventCtx = observability.WithFields(eventCtx,
 			slog.String("eventId", event.ID.String()),
 			slog.String("correlationId", event.CorrelationID),
 			slog.String("walletId", event.OrderingKey),
@@ -109,6 +122,10 @@ func (p *Publisher) RunOnce(ctx context.Context) (int, error) {
 			eventCtx = observability.WithFields(eventCtx, slog.String("transactionId", event.AggregateID.String()))
 		}
 		if err := p.publishOne(eventCtx, event); err != nil {
+			if span != nil {
+				span.SetStatus(codes.Error, "publish failed")
+				span.End()
+			}
 			p.logger.ErrorContext(eventCtx, "publicador: evento falhou", "error", err)
 			if p.metrics != nil {
 				p.metrics.Latency("outbox_publish", time.Since(started))
@@ -118,6 +135,9 @@ func (p *Publisher) RunOnce(ctx context.Context) (int, error) {
 		if p.metrics != nil {
 			p.metrics.OutboxDelay(p.clock.Now().Sub(event.OccurredAt))
 			p.metrics.Latency("outbox_publish", time.Since(started))
+		}
+		if span != nil {
+			span.End()
 		}
 		p.logger.InfoContext(eventCtx, "evento publicado")
 		published++
