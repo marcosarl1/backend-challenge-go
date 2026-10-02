@@ -256,6 +256,13 @@ func TestLedgerAndInboxOutboxStores(t *testing.T) {
 	}
 
 	// Outbox: enfileira, reserva, confirma; depois não há mais pendente.
+	// Começa zerando a tabela: a reserva pega tudo vencido, e restos de outras execuções entrariam no lote.
+	if err := uow.Do(ctx, func(ctx context.Context, db pgx.Tx) error {
+		_, err := db.Exec(ctx, `DELETE FROM outbox_events`)
+		return err
+	}); err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
 	evID, _ := uuid.NewV7()
 	if err := uow.Do(ctx, func(ctx context.Context, db pgx.Tx) error {
 		return outbox.Insert(ctx, db, postgres.OutboxEvent{
