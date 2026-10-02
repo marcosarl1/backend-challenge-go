@@ -50,24 +50,28 @@ func (LedgerStore) SumByWallet(ctx context.Context, db DBTX, walletID uuid.UUID,
 }
 
 // Page devolve uma página estável por seq (cursor opaco = último seq visto).
-func (LedgerStore) Page(ctx context.Context, db DBTX, walletID uuid.UUID, afterSeq int64, limit int) ([]wallet.LedgerEntry, error) {
-	rows, err := db.Query(ctx, `SELECT id, wallet_id, transaction_id, direction, amount_minor, currency,
+// Devolve também o maior seq da página, para montar o próximo cursor.
+func (LedgerStore) Page(ctx context.Context, db DBTX, walletID uuid.UUID, afterSeq int64, limit int) ([]wallet.LedgerEntry, int64, error) {
+	rows, err := db.Query(ctx, `SELECT seq, id, wallet_id, transaction_id, direction, amount_minor, currency,
 		balance_before_minor, balance_after_minor, created_at
 		FROM wallet_ledger_entries WHERE wallet_id = $1 AND seq > $2
 		ORDER BY seq LIMIT $3`, toPGUUID(walletID), afterSeq, limit)
 	if err != nil {
-		return nil, fmt.Errorf("paginando ledger: %w", err)
+		return nil, 0, fmt.Errorf("paginando ledger: %w", err)
 	}
 	defer rows.Close()
 	var out []wallet.LedgerEntry
+	var lastSeq int64
 	for rows.Next() {
-		e, err := scanEntry(rows)
+		var seq int64
+		e, err := scanEntryWithSeq(rows, &seq)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, e)
+		lastSeq = seq
 	}
-	return out, rows.Err()
+	return out, lastSeq, rows.Err()
 }
 
 // ReconcileSnapshot é o retrato de uma vez só para a reconciliação.
@@ -97,12 +101,12 @@ func (LedgerStore) SnapshotForReconcile(ctx context.Context, db DBTX, walletID u
 	return snap, nil
 }
 
-func scanEntry(row interface{ Scan(...any) error }) (wallet.LedgerEntry, error) {
+func scanEntryWithSeq(row interface{ Scan(...any) error }, seq *int64) (wallet.LedgerEntry, error) {
 	var id, walletID, txID pgtype.UUID
 	var direction, currency string
 	var amount, before, after int64
 	var createdAt time.Time
-	if err := row.Scan(&id, &walletID, &txID, &direction, &amount, &currency, &before, &after, &createdAt); err != nil {
+	if err := row.Scan(seq, &id, &walletID, &txID, &direction, &amount, &currency, &before, &after, &createdAt); err != nil {
 		return wallet.LedgerEntry{}, fmt.Errorf("lendo lançamento: %w", err)
 	}
 	entryID, err := fromPGUUID("id", id)

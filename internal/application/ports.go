@@ -41,7 +41,7 @@ type WagerRepository interface {
 type LedgerRepository interface {
 	Insert(ctx context.Context, e wallet.LedgerEntry) error
 	SumByWallet(ctx context.Context, walletID uuid.UUID, cur money.Currency) (money.Money, int64, error)
-	Page(ctx context.Context, walletID uuid.UUID, afterSeq int64, limit int) ([]wallet.LedgerEntry, error)
+	Page(ctx context.Context, walletID uuid.UUID, afterSeq int64, limit int) ([]wallet.LedgerEntry, int64, error)
 	SnapshotForReconcile(ctx context.Context, walletID uuid.UUID) (ReconcileSnapshot, error)
 }
 

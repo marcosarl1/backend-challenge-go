@@ -226,7 +226,7 @@ func TestLedgerAndInboxOutboxStores(t *testing.T) {
 		if total.String() != "100.00" || count != 1 {
 			t.Fatalf("soma = %s (%d)", total, count)
 		}
-		page, err := ledger.Page(ctx, db, id, 0, 50)
+		page, _, err := ledger.Page(ctx, db, id, 0, 50)
 		if err != nil || len(page) != 1 || page[0].ID() != entryID {
 			t.Fatalf("página = %v, %v", page, err)
 		}

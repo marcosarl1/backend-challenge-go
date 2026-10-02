@@ -97,7 +97,7 @@ func (a ledgerAdapter) SumByWallet(ctx context.Context, walletID uuid.UUID, cur 
 	return LedgerStore{}.SumByWallet(ctx, a.db, walletID, cur)
 }
 
-func (a ledgerAdapter) Page(ctx context.Context, walletID uuid.UUID, afterSeq int64, limit int) ([]wallet.LedgerEntry, error) {
+func (a ledgerAdapter) Page(ctx context.Context, walletID uuid.UUID, afterSeq int64, limit int) ([]wallet.LedgerEntry, int64, error) {
 	return LedgerStore{}.Page(ctx, a.db, walletID, afterSeq, limit)
 }
 
