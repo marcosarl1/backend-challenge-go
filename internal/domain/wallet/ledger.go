@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -17,12 +18,6 @@ const (
 	DirectionCredit Direction = "CREDIT"
 )
 
-/*
-* LedgerEntry é um lançamento imutável do ledger: registra de quanto o saldo
-saiu, para quanto foi e qual operação causou a mudança. Construído só via
-NewLedgerEntry, que confere a aritmética (saldo posterior = saldo anterior
-± valor, conforme a direção).
-*/
 type LedgerEntry struct {
 	id            uuid.UUID
 	walletID      uuid.UUID
@@ -31,10 +26,10 @@ type LedgerEntry struct {
 	amount        money.Money
 	balanceBefore money.Money
 	balanceAfter  money.Money
+	createdAt     time.Time
 }
 
-// NewLedgerEntry valida e monta um lançamento. Valor zerado, direção desconhecida ou aritmética inconsistente são rejeitados.
-func NewLedgerEntry(id, walletID, transactionID uuid.UUID, direction Direction, amount, balanceBefore, balanceAfter money.Money) (LedgerEntry, error) {
+func NewLedgerEntry(id, walletID, transactionID uuid.UUID, direction Direction, amount, balanceBefore, balanceAfter money.Money, createdAt time.Time) (LedgerEntry, error) {
 	if id == uuid.Nil || walletID == uuid.Nil || transactionID == uuid.Nil {
 		return LedgerEntry{}, fmt.Errorf("%w: identificador vazio no lançamento", domain.ErrUninitialized)
 	}
@@ -43,6 +38,9 @@ func NewLedgerEntry(id, walletID, transactionID uuid.UUID, direction Direction, 
 	}
 	if !amount.Valid() || !balanceBefore.Valid() || !balanceAfter.Valid() {
 		return LedgerEntry{}, domain.ErrUninitialized
+	}
+	if createdAt.IsZero() {
+		return LedgerEntry{}, fmt.Errorf("%w: instante vazio no lançamento", domain.ErrUninitialized)
 	}
 	zero, _ := money.Zero(amount.Currency())
 	if cmp, _ := amount.Cmp(zero); cmp <= 0 {
@@ -64,6 +62,7 @@ func NewLedgerEntry(id, walletID, transactionID uuid.UUID, direction Direction, 
 		id: id, walletID: walletID, transactionID: transactionID,
 		direction: direction, amount: amount,
 		balanceBefore: balanceBefore, balanceAfter: balanceAfter,
+		createdAt: createdAt,
 	}, nil
 }
 
@@ -83,3 +82,4 @@ func (e LedgerEntry) Direction() Direction       { return e.direction }
 func (e LedgerEntry) Amount() money.Money        { return e.amount }
 func (e LedgerEntry) BalanceBefore() money.Money { return e.balanceBefore }
 func (e LedgerEntry) BalanceAfter() money.Money  { return e.balanceAfter }
+func (e LedgerEntry) CreatedAt() time.Time       { return e.createdAt }

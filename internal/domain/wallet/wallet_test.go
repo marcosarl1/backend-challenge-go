@@ -271,11 +271,15 @@ func TestLedgerEntryValidation(t *testing.T) {
 	ten := mustMoney(t, "10.00", "BRL")
 	fifteen := mustMoney(t, "15.00", "BRL")
 	zero, _ := money.Zero("BRL")
+	now := time.Now().UTC()
+	entry := func(direction Direction, amount, before, after money.Money) (LedgerEntry, error) {
+		return NewLedgerEntry(id, wid, tx, direction, amount, before, after, now)
+	}
 
-	if _, err := NewLedgerEntry(id, wid, tx, DirectionDebit, ten, fifteen, mustMoney(t, "5.00", "BRL")); err != nil {
+	if _, err := entry(DirectionDebit, ten, fifteen, mustMoney(t, "5.00", "BRL")); err != nil {
 		t.Fatalf("lançamento válido rejeitado: %v", err)
 	}
-	if _, err := NewLedgerEntry(id, wid, tx, DirectionCredit, ten, fifteen, mustMoney(t, "25.00", "BRL")); err != nil {
+	if _, err := entry(DirectionCredit, ten, fifteen, mustMoney(t, "25.00", "BRL")); err != nil {
 		t.Fatalf("lançamento válido rejeitado: %v", err)
 	}
 
@@ -293,17 +297,46 @@ func TestLedgerEntryValidation(t *testing.T) {
 		{"crédito errado", DirectionCredit, fifteen, ten, mustMoney(t, "24.00", "BRL")},
 		{"saldo negativo", DirectionDebit, mustMoney(t, "5.00", "BRL"), ten, negFive},
 	} {
-		if _, err := NewLedgerEntry(id, wid, tx, tt.direction, tt.amount, tt.before, tt.after); err == nil {
+		if _, err := entry(tt.direction, tt.amount, tt.before, tt.after); err == nil {
 			t.Fatalf("%s aceito, esperado rejeição", tt.name)
 		}
 	}
-	if _, err := NewLedgerEntry(id, wid, tx, "SIDEWAYS", ten, fifteen, fifteen); err == nil {
+	// Moedas misturadas não fecham a conta.
+	usd, _ := money.Parse("10.00", "USD")
+	if _, err := entry(DirectionDebit, usd, fifteen, mustMoney(t, "5.00", "BRL")); !errors.Is(err, domain.ErrCurrencyMismatch) {
+		t.Fatalf("moeda misturada erro = %v", err)
+	}
+	if _, err := NewLedgerEntry(id, wid, tx, "SIDEWAYS", ten, fifteen, fifteen, now); err == nil {
 		t.Fatal("direção desconhecida aceita")
 	}
-	if _, err := NewLedgerEntry(id, wid, tx, DirectionDebit, zero, fifteen, fifteen); err == nil {
+	if _, err := entry(DirectionDebit, zero, fifteen, fifteen); err == nil {
 		t.Fatal("valor zero aceito")
 	}
-	if _, err := NewLedgerEntry(uuid.Nil, wid, tx, DirectionDebit, ten, fifteen, fifteen); err == nil {
+	if _, err := NewLedgerEntry(uuid.Nil, wid, tx, DirectionDebit, ten, fifteen, fifteen, now); err == nil {
 		t.Fatal("id vazio aceito")
+	}
+	if _, err := NewLedgerEntry(id, wid, tx, DirectionDebit, ten, fifteen, mustMoney(t, "5.00", "BRL"), time.Time{}); err == nil {
+		t.Fatal("instante vazio aceito")
+	}
+}
+
+func TestLedgerEntryKeepsMovementInstant(t *testing.T) {
+	// O lançamento carrega o instante do movimento e não muda quando a carteira anda: é o retrato daquela operação.
+	w := newFunded(t, "100.00")
+	moment := time.Now().UTC().Add(time.Hour)
+	tx, _ := uuid.NewV7()
+	out, err := w.Debit(tx, mustMoney(t, "30.00", "BRL"), moment)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+	if !out.CreatedAt().Equal(moment) {
+		t.Fatalf("instante = %v, esperado %v", out.CreatedAt(), moment)
+	}
+	tx2, _ := uuid.NewV7()
+	if _, err := w.Credit(tx2, mustMoney(t, "5.00", "BRL"), moment.Add(time.Minute)); err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+	if out.BalanceBefore().String() != "100.00" || out.BalanceAfter().String() != "70.00" {
+		t.Fatalf("lançamento mudou depois: %+v", out)
 	}
 }

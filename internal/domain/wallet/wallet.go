@@ -189,7 +189,7 @@ func (w *Wallet) prepare(txID uuid.UUID, amt money.Money, direction Direction, n
 	if err != nil {
 		return after, entry, fmt.Errorf("gerando lançamento: %w", err)
 	}
-	entry, err = NewLedgerEntry(entryID, w.id, txID, direction, amt, w.balance, after)
+	entry, err = NewLedgerEntry(entryID, w.id, txID, direction, amt, w.balance, after, now)
 	if err != nil {
 		return after, entry, err
 	}
