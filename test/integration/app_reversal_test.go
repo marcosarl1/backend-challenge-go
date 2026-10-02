@@ -40,6 +40,16 @@ func buildPendingBet(playerID, walletID uuid.UUID, externalID string) (*wager.Wa
 	}, application.SystemClock{}.Now())
 }
 
+// cleanPendingTx remove esperas de outras execuções (só pendentes, sem ledger nem referência resolvida: nada as amarra).
+func cleanPendingTx(t *testing.T) {
+	t.Helper()
+	conn := connect(t, ownerURL(t))
+	if _, err := conn.Exec(context.Background(), `DELETE FROM wager_transactions
+		WHERE status IN ('PENDING', 'PENDING_REFERENCE')`); err != nil {
+		t.Fatalf("limpando pendências: %v", err)
+	}
+}
+
 func retryPending(t *testing.T, runner postgres.Runner) int {
 	t.Helper()
 	n, err := application.RetryPending(context.Background(), runner, application.SystemClock{}, application.UUIDv7Generator{}, 10)
@@ -60,6 +70,7 @@ func makeDue(t *testing.T, txID uuid.UUID) {
 }
 
 func TestRefundBeforeBetResolvesLater(t *testing.T) {
+	cleanPendingTx(t)
 	refUniq := uuid.NewString()
 	runner := openRunner(t)
 	walletID, playerID := fundWallet(t, runner, "1000.00")
@@ -102,6 +113,7 @@ func TestRefundBeforeBetResolvesLater(t *testing.T) {
 }
 
 func TestRefundAgainstPendingReference(t *testing.T) {
+	cleanPendingTx(t)
 	refUniq := uuid.NewString()
 	runner := openRunner(t)
 	ctx := context.Background()
@@ -222,6 +234,7 @@ func TestRollbackWinWithoutFunds(t *testing.T) {
 }
 
 func TestPendingExpires(t *testing.T) {
+	cleanPendingTx(t)
 	refUniq := uuid.NewString()
 	runner := openRunner(t)
 	ctx := context.Background()
@@ -252,6 +265,7 @@ func TestPendingExpires(t *testing.T) {
 }
 
 func TestWinWithReferenceBeforeBet(t *testing.T) {
+	cleanPendingTx(t)
 	refUniq := uuid.NewString()
 	runner := openRunner(t)
 	walletID, playerID := fundWallet(t, runner, "1000.00")

@@ -136,6 +136,31 @@ func (a outboxAdapter) Insert(ctx context.Context, e application.OutboxEvent, ne
 	}, nextAttempt)
 }
 
+func (a outboxAdapter) Claim(ctx context.Context, owner string, now, leaseUntil time.Time, limit int) ([]application.OutboxClaim, error) {
+	claimed, err := OutboxStore{}.Claim(ctx, a.db, owner, now, leaseUntil, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]application.OutboxClaim, 0, len(claimed))
+	for _, e := range claimed {
+		out = append(out, application.OutboxClaim{
+			ID: e.ID, AggregateType: e.AggregateType, AggregateID: e.AggregateID,
+			EventType: e.EventType, EventVersion: e.EventVersion, OrderingKey: e.OrderingKey,
+			CorrelationID: e.CorrelationID, CausationID: e.CausationID,
+			Payload: e.Payload, OccurredAt: e.OccurredAt, Attempts: e.Attempts,
+		})
+	}
+	return out, nil
+}
+
+func (a outboxAdapter) MarkPublished(ctx context.Context, id uuid.UUID, owner string, now time.Time) error {
+	return OutboxStore{}.MarkPublished(ctx, a.db, id, owner, now)
+}
+
+func (a outboxAdapter) DeferFailed(ctx context.Context, id uuid.UUID, owner string, next time.Time, lastErr string) error {
+	return OutboxStore{}.DeferFailed(ctx, a.db, id, owner, next, lastErr)
+}
+
 // RepositoriesFor amarra as portas na conexão dada (pool ou transação).
 func RepositoriesFor(db DBTX) application.Repositories {
 	return application.Repositories{

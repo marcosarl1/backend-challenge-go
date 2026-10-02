@@ -18,7 +18,7 @@ import (
 	"github.com/marcosarl1/backend-challenge-go/internal/infra/postgres"
 )
 
-func testServer(t *testing.T) (*httptest.Server, string, string, string) {
+func testServer(t *testing.T) (*httptest.Server, string, string, string, postgres.Runner) {
 	t.Helper()
 	dbURL := ownerURL(t)
 	base := keycloakURL(t)
@@ -40,7 +40,8 @@ func testServer(t *testing.T) (*httptest.Server, string, string, string) {
 	return srv,
 		clientToken(t, base, "provider-a", "provider-a-secret"),
 		clientToken(t, base, "provider-b", "provider-b-secret"),
-		clientToken(t, base, "wallet-internal", "wallet-internal-secret")
+		clientToken(t, base, "wallet-internal", "wallet-internal-secret"),
+		runner
 }
 
 func doJSON(t *testing.T, method, url, token string, headers map[string]string, body any) (int, map[string]any, http.Header) {
@@ -94,7 +95,7 @@ func openWalletHTTP(t *testing.T, srv, token, playerID, amount string) map[strin
 }
 
 func TestContractHappyPaths(t *testing.T) {
-	srv, providerToken, _, internalToken := testServer(t)
+	srv, providerToken, _, internalToken, runner := testServer(t)
 	playerID := uuid.NewString()
 	opened := openWalletHTTP(t, srv.URL, internalToken, playerID, "1000.00")
 	walletID := opened["id"].(string)
@@ -135,10 +136,29 @@ func TestContractHappyPaths(t *testing.T) {
 	if headers.Get("Location") == "" || headers.Get("Retry-After") == "" {
 		t.Fatal("202 sem Location/Retry-After")
 	}
+	// Fecha o ciclo: a aposta chega e a retomada conclui o reembolso.
+	status, _, _ = doJSON(t, "POST", srv.URL+"/wagering/transactions", providerToken,
+		map[string]string{"Idempotency-Key": "provider-a:futura-" + ext}, betBody(playerID, walletID, "futura-"+ext))
+	if status != http.StatusOK {
+		t.Fatalf("aposta futura = %d", status)
+	}
+	if _, err := connect(t, ownerURL(t)).Exec(context.Background(), `UPDATE wager_transactions
+		SET next_attempt_at = now() - interval '1 second'
+		WHERE external_transaction_id = $1`, "rb-"+ext); err != nil {
+		t.Fatalf("adiantando: %v", err)
+	}
+	n, err := application.RetryPending(context.Background(), runner, application.SystemClock{}, application.UUIDv7Generator{}, 10)
+	if err != nil || n < 1 {
+		t.Fatalf("retomadas = %d, %v", n, err)
+	}
+	status, body, _ = doJSON(t, "GET", srv.URL+"/providers/provider-a/wagering/transactions/rb-"+ext, providerToken, nil, nil)
+	if status != http.StatusOK || body["status"] != "PROCESSED" {
+		t.Fatalf("reembolso = %d %v", status, body)
+	}
 }
 
 func TestContractErrors(t *testing.T) {
-	srv, providerToken, providerBToken, internalToken := testServer(t)
+	srv, providerToken, providerBToken, internalToken, _ := testServer(t)
 	playerID := uuid.NewString()
 	opened := openWalletHTTP(t, srv.URL, internalToken, playerID, "1000.00")
 	walletID := opened["id"].(string)

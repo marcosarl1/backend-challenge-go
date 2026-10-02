@@ -72,11 +72,30 @@ type OutboxEvent struct {
 	CausationID   string
 	Payload       []byte
 	OccurredAt    time.Time
+	Attempts      int
+}
+
+// OutboxClaim é um evento reservado para publicar.
+type OutboxClaim struct {
+	ID            uuid.UUID
+	AggregateType string
+	AggregateID   uuid.UUID
+	EventType     string
+	EventVersion  int
+	OrderingKey   string
+	CorrelationID string
+	CausationID   string
+	Payload       []byte
+	OccurredAt    time.Time
+	Attempts      int
 }
 
 // OutboxRepository é o que os casos de uso e o publicador precisam.
 type OutboxRepository interface {
 	Insert(ctx context.Context, e OutboxEvent, nextAttempt time.Time) error
+	Claim(ctx context.Context, owner string, now, leaseUntil time.Time, limit int) ([]OutboxClaim, error)
+	MarkPublished(ctx context.Context, id uuid.UUID, owner string, now time.Time) error
+	DeferFailed(ctx context.Context, id uuid.UUID, owner string, next time.Time, lastErr string) error
 }
 
 // Repositories junta as portas para a unidade de trabalho entregar de uma

@@ -21,6 +21,7 @@ type OutboxEvent struct {
 	CausationID   string
 	Payload       []byte
 	OccurredAt    time.Time
+	Attempts      int
 }
 
 // OutboxStore grava e reserva eventos para o publicador.
@@ -52,7 +53,7 @@ func (OutboxStore) Claim(ctx context.Context, db DBTX, owner string, now, leaseU
 			  AND (lease_until IS NULL OR lease_until < $3)
 			ORDER BY occurred_at LIMIT $4 FOR UPDATE SKIP LOCKED)
 		RETURNING id, aggregate_type, aggregate_id, event_type, event_version,
-			ordering_key, correlation_id, causation_id, payload, occurred_at`,
+			ordering_key, correlation_id, causation_id, payload, occurred_at, attempts`,
 		owner, leaseUntil, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("reservando eventos: %w", err)
@@ -64,7 +65,7 @@ func (OutboxStore) Claim(ctx context.Context, db DBTX, owner string, now, leaseU
 		var id, agg pgtype.UUID
 		var causation *string
 		if err := rows.Scan(&id, &e.AggregateType, &agg, &e.EventType, &e.EventVersion,
-			&e.OrderingKey, &e.CorrelationID, &causation, &e.Payload, &e.OccurredAt); err != nil {
+			&e.OrderingKey, &e.CorrelationID, &causation, &e.Payload, &e.OccurredAt, &e.Attempts); err != nil {
 			return nil, fmt.Errorf("lendo evento: %w", err)
 		}
 		var err error
