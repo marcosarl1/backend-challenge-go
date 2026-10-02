@@ -1,7 +1,11 @@
 package main
 
-import "fmt"
+import (
+	"go.uber.org/fx"
+
+	"github.com/marcosarl1/backend-challenge-go/internal/platform"
+)
 
 func main() {
-	fmt.Println("")
+	fx.New(platform.Module).Run()
 }
