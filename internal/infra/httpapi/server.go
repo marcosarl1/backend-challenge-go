@@ -1,0 +1,265 @@
+package httpapi
+
+import (
+	"context"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/marcosarl1/backend-challenge-go/internal/application"
+	"github.com/marcosarl1/backend-challenge-go/internal/domain/money"
+	"github.com/marcosarl1/backend-challenge-go/internal/domain/wager"
+	"github.com/marcosarl1/backend-challenge-go/internal/infra/auth"
+)
+
+// Server expõe os casos de uso em HTTP. Handlers finos: parseiam, chamam e
+// traduzem; regra mora na aplicação.
+type Server struct {
+	uow   application.UnitOfWork
+	auth  Authenticator
+	clock application.Clock
+	ids   application.IDGenerator
+}
+
+// New monta o servidor sobre as dependências.
+func New(uow application.UnitOfWork, auth Authenticator, clock application.Clock, ids application.IDGenerator) *Server {
+	return &Server{uow: uow, auth: auth, clock: clock, ids: ids}
+}
+
+// Handler monta as rotas.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /wallets", s.handleOpenWallet)
+	mux.HandleFunc("GET /wallets/{walletId}", s.handleGetWallet)
+	mux.HandleFunc("GET /wallets/{walletId}/ledger", s.handleListLedger)
+	mux.HandleFunc("POST /wallets/{walletId}/reconciliation", s.handleReconcile)
+	mux.HandleFunc("POST /wagering/transactions", s.handleProcess)
+	mux.HandleFunc("GET /wagering/transactions/{transactionId}", s.handleGetTransaction)
+	mux.HandleFunc("GET /providers/{providerId}/wagering/transactions/{externalTransactionId}", s.handleGetByExternal)
+	return s.withCorrelation(s.withAuth(mux))
+}
+
+// withCorrelation carrega ou gera o id de correlação (vai e volta no header,
+// entra no corpo de erro e no contexto).
+func (s *Server) withCorrelation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		corr := r.Header.Get("X-Correlation-Id")
+		if corr == "" {
+			corr = uuid.NewString()
+		}
+		w.Header().Set("X-Correlation-Id", corr)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey("correlation"), corr)))
+	})
+}
+
+// withAuth exige Bearer válido e guarda a identidade no contexto.
+func (s *Server) withAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw := r.Header.Get("Authorization")
+		token, ok := strings.CutPrefix(raw, "Bearer ")
+		if !ok || token == "" {
+			writeError(w, r, &authError{err: auth.ErrMissingToken})
+			return
+		}
+		principal, err := s.auth.Authenticate(r.Context(), token)
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		ctx := context.WithValue(r.Context(), identityKey, principal.Identity())
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// authError embrulha o erro de autenticação para o mapeamento.
+type authError struct{ err error }
+
+func (e *authError) Error() string { return e.err.Error() }
+func (e *authError) Unwrap() error { return e.err }
+
+func (s *Server) handleOpenWallet(w http.ResponseWriter, r *http.Request) {
+	var body OpenWalletRequest
+	if err := decode(r, &body); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	playerID, err := parseUUID("playerId", body.PlayerID)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	balance, err := body.InitialBalance.parse()
+	if err != nil {
+		writeError(w, r, application.ErrInvalidInput)
+		return
+	}
+	res, err := application.OpenWallet(r.Context(), s.uow, s.clock, s.ids, identityOf(r),
+		application.OpenWalletCommand{PlayerID: playerID, InitialBalance: balance, CorrelationID: correlationOf(r)})
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id": res.WalletID.String(), "playerId": playerID.String(),
+		"balance": moneyDTO(res.Balance), "version": res.Version,
+	})
+}
+
+func (s *Server) handleGetWallet(w http.ResponseWriter, r *http.Request) {
+	id, err := parseUUID("walletId", r.PathValue("walletId"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	view, err := application.GetWallet(r.Context(), s.uow, identityOf(r), id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": view.ID.String(), "playerId": view.PlayerID.String(),
+		"balance": moneyDTO(view.Balance), "version": view.Version,
+	})
+}
+
+func (s *Server) handleListLedger(w http.ResponseWriter, r *http.Request) {
+	id, err := parseUUID("walletId", r.PathValue("walletId"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil {
+			writeError(w, r, application.ErrInvalidInput)
+			return
+		}
+	}
+	page, err := application.ListLedger(r.Context(), s.uow, identityOf(r), id, r.URL.Query().Get("cursor"), limit)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	entries := make([]any, 0, len(page.Entries))
+	for _, e := range page.Entries {
+		entries = append(entries, map[string]any{
+			"id": e.ID.String(), "walletId": e.WalletID.String(), "transactionId": e.TransactionID.String(),
+			"direction": e.Direction, "money": moneyDTO(e.Amount),
+			"balanceBefore": moneyDTO(e.BalanceBefore), "balanceAfter": moneyDTO(e.BalanceAfter),
+			"createdAt": e.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "nextCursor": page.NextCursor})
+}
+
+func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
+	id, err := parseUUID("walletId", r.PathValue("walletId"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	rep, err := application.Reconcile(r.Context(), s.uow, nil, identityOf(r), id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"walletId":      rep.WalletID.String(),
+		"storedBalance": moneyDTO(rep.Stored), "calculatedBalance": moneyDTO(rep.Calculated),
+		"difference": moneyDTO(rep.Difference), "consistent": rep.Consistent,
+		"checkedEntries": rep.CheckedEntries,
+	})
+}
+
+func (s *Server) handleProcess(w http.ResponseWriter, r *http.Request) {
+	var body ProcessRequest
+	if err := decode(r, &body); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	cmd, err := body.command(r.Header.Get("Idempotency-Key"), correlationOf(r))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	res, err := application.Execute(r.Context(), s.uow, s.clock, s.ids, identityOf(r), cmd)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	out := map[string]any{
+		"transactionId": res.TransactionID.String(), "status": string(res.Status),
+		"balance": moneyDTO(res.Balance), "idempotentReplay": res.IdempotentReplay,
+	}
+	switch res.Status {
+	case wager.StatusProcessed:
+		writeJSON(w, http.StatusOK, out)
+	case wager.StatusRejected, wager.StatusFailed:
+		out["failureCode"] = string(res.FailureCode)
+		writeJSON(w, http.StatusUnprocessableEntity, out)
+	default:
+		w.Header().Set("Location", "/wagering/transactions/"+res.TransactionID.String())
+		w.Header().Set("Retry-After", "2")
+		writeJSON(w, http.StatusAccepted, out)
+	}
+}
+
+func (s *Server) handleGetTransaction(w http.ResponseWriter, r *http.Request) {
+	id, err := parseUUID("transactionId", r.PathValue("transactionId"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	view, err := application.GetTransaction(r.Context(), s.uow, identityOf(r), id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, transactionDTO(view))
+}
+
+func (s *Server) handleGetByExternal(w http.ResponseWriter, r *http.Request) {
+	view, err := application.GetTransactionByExternal(r.Context(), s.uow, identityOf(r),
+		r.PathValue("providerId"), r.PathValue("externalTransactionId"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, transactionDTO(view))
+}
+
+func moneyDTO(m money.Money) map[string]any {
+	return map[string]any{"amount": m.String(), "currency": string(m.Currency())}
+}
+
+func transactionDTO(view *application.TransactionView) map[string]any {
+	out := map[string]any{
+		"transactionId": view.TransactionID.String(), "providerId": view.ProviderID,
+		"externalTransactionId": view.ExternalID, "walletId": view.WalletID.String(),
+		"playerId": view.PlayerID.String(), "roundId": view.RoundID, "gameId": view.GameID,
+		"kind": string(view.Kind), "money": moneyDTO(view.Amount), "status": string(view.Status),
+	}
+	if view.ReferenceExternalID != "" {
+		out["referenceExternalTransactionId"] = view.ReferenceExternalID
+	}
+	if view.FailureCode != "" {
+		out["failureCode"] = string(view.FailureCode)
+		out["failureDetail"] = view.FailureDetail
+	}
+	if view.HasResult {
+		out["resultBalance"] = moneyDTO(view.ResultBalance)
+		out["resultWalletVersion"] = view.ResultWalletVersion
+	}
+	if view.Attempts > 0 {
+		out["attempts"] = view.Attempts
+	}
+	if !view.NextAttemptAt.IsZero() {
+		out["nextAttemptAt"] = view.NextAttemptAt.UTC().Format(time.RFC3339Nano)
+		out["expiresAt"] = view.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	return out
+}
