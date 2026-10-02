@@ -70,6 +70,33 @@ func (LedgerStore) Page(ctx context.Context, db DBTX, walletID uuid.UUID, afterS
 	return out, rows.Err()
 }
 
+// ReconcileSnapshot é o retrato de uma vez só para a reconciliação.
+type ReconcileSnapshot struct {
+	StoredMinor int64
+	Currency    string
+	Credits     int64
+	Debits      int64
+	Entries     int64
+}
+
+// SnapshotForReconcile lê saldo guardado e agregados do ledger num SELECT só: o mesmo objeto, sem falso positivo sob carga.
+func (LedgerStore) SnapshotForReconcile(ctx context.Context, db DBTX, walletID uuid.UUID) (ReconcileSnapshot, error) {
+	var snap ReconcileSnapshot
+	err := db.QueryRow(ctx, `SELECT w.balance_minor, w.currency,
+		COALESCE(SUM(e.amount_minor) FILTER (WHERE e.direction = 'CREDIT'), 0),
+		COALESCE(SUM(e.amount_minor) FILTER (WHERE e.direction = 'DEBIT'), 0),
+		COUNT(e.seq)
+		FROM wallets w LEFT JOIN wallet_ledger_entries e
+		  ON e.wallet_id = w.id AND e.currency = w.currency
+		WHERE w.id = $1
+		GROUP BY w.balance_minor, w.currency`, toPGUUID(walletID)).Scan(
+		&snap.StoredMinor, &snap.Currency, &snap.Credits, &snap.Debits, &snap.Entries)
+	if err != nil {
+		return ReconcileSnapshot{}, fmt.Errorf("lendo retrato: %w", err)
+	}
+	return snap, nil
+}
+
 func scanEntry(row interface{ Scan(...any) error }) (wallet.LedgerEntry, error) {
 	var id, walletID, txID pgtype.UUID
 	var direction, currency string

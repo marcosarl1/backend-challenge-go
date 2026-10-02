@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -97,6 +99,20 @@ func (a ledgerAdapter) SumByWallet(ctx context.Context, walletID uuid.UUID, cur 
 
 func (a ledgerAdapter) Page(ctx context.Context, walletID uuid.UUID, afterSeq int64, limit int) ([]wallet.LedgerEntry, error) {
 	return LedgerStore{}.Page(ctx, a.db, walletID, afterSeq, limit)
+}
+
+func (a ledgerAdapter) SnapshotForReconcile(ctx context.Context, walletID uuid.UUID) (application.ReconcileSnapshot, error) {
+	snap, err := LedgerStore{}.SnapshotForReconcile(ctx, a.db, walletID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return application.ReconcileSnapshot{}, fmt.Errorf("%w: carteira", application.ErrNotFound)
+		}
+		return application.ReconcileSnapshot{}, err
+	}
+	return application.ReconcileSnapshot{
+		StoredMinor: snap.StoredMinor, Currency: snap.Currency,
+		Credits: snap.Credits, Debits: snap.Debits, Entries: snap.Entries,
+	}, nil
 }
 
 type inboxAdapter struct{ db DBTX }

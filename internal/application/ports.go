@@ -42,6 +42,16 @@ type LedgerRepository interface {
 	Insert(ctx context.Context, e wallet.LedgerEntry) error
 	SumByWallet(ctx context.Context, walletID uuid.UUID, cur money.Currency) (money.Money, int64, error)
 	Page(ctx context.Context, walletID uuid.UUID, afterSeq int64, limit int) ([]wallet.LedgerEntry, error)
+	SnapshotForReconcile(ctx context.Context, walletID uuid.UUID) (ReconcileSnapshot, error)
+}
+
+// ReconcileSnapshot é o retrato de uma vez só: saldo guardado mais os agregados do ledger, lidos na mesma foto (um SELECT só, sem falso positivo sob carga).
+type ReconcileSnapshot struct {
+	StoredMinor int64
+	Currency    string
+	Credits     int64
+	Debits      int64
+	Entries     int64
 }
 
 // InboxRepository é o que o consumidor precisa da caixa de entrada.
