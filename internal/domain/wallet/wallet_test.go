@@ -306,6 +306,10 @@ func TestLedgerEntryValidation(t *testing.T) {
 	if _, err := entry(DirectionDebit, usd, fifteen, mustMoney(t, "5.00", "BRL")); !errors.Is(err, domain.ErrCurrencyMismatch) {
 		t.Fatalf("moeda misturada erro = %v", err)
 	}
+	// Mesmo saldo numérico em outra moeda também deve ser rejeitado.
+	if _, err := entry(DirectionDebit, ten, fifteen, mustMoney(t, "5.00", "USD")); !errors.Is(err, domain.ErrCurrencyMismatch) {
+		t.Fatalf("saldo posterior em USD erro = %v", err)
+	}
 	if _, err := NewLedgerEntry(id, wid, tx, "SIDEWAYS", ten, fifteen, fifteen, now); err == nil {
 		t.Fatal("direção desconhecida aceita")
 	}

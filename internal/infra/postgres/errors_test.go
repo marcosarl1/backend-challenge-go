@@ -1,7 +1,9 @@
 package postgres
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -22,8 +24,15 @@ func TestClassify(t *testing.T) {
 		{"conexão repete", pgErr("08006", ""), ClassTransient},
 		{"banco caiu repete", pgErr("57P01", ""), ClassTransient},
 		{"pool cheio repete", pgErr("53300", ""), ClassTransient},
+		{"conexão indisponível repete", pgErr("08001", ""), ClassTransient},
+		{"disco cheio repete", pgErr("53100", ""), ClassTransient},
 		{"única é restrição", pgErr("23505", "wt_provider_idemkey_uk"), ClassConstraint},
+		{"estrangeira é restrição", pgErr("23503", "wallet_fkey"), ClassConstraint},
+		{"não-nulo é restrição", pgErr("23502", "wallet_id_not_null"), ClassConstraint},
 		{"check é restrição", pgErr("23514", "ledger_arith"), ClassConstraint},
+		{"exclusão é restrição", pgErr("23P01", "period_exclusion"), ClassConstraint},
+		{"prazo estourado repete", fmt.Errorf("consulta: %w", context.DeadlineExceeded), ClassTransient},
+		{"cancelamento não repete", context.Canceled, ClassPermanent},
 		{"permissão é permanente", pgErr("42501", ""), ClassPermanent},
 		{"sql ruim é permanente", pgErr("42601", ""), ClassPermanent},
 		{"nulo é permanente", nil, ClassPermanent},
@@ -54,6 +63,14 @@ func TestAsConstraint(t *testing.T) {
 	}
 	if _, ok := AsConstraint(errors.New("rede")); ok {
 		t.Fatal("erro comum não é restrição")
+	}
+	wrapped := fmt.Errorf("inserindo: %w", pgErr("23503", "wallet_fkey"))
+	foreign, ok := AsConstraint(wrapped)
+	if !ok || foreign.Code != "23503" || foreign.Constraint != "wallet_fkey" || !errors.Is(foreign, wrapped) {
+		t.Fatalf("restrição embrulhada = %+v, ok = %v", foreign, ok)
+	}
+	if foreign.Error() == "" {
+		t.Fatal("restrição sem descrição")
 	}
 	var target *ConstraintError
 	if !errors.As(ce, &target) || target.Constraint != "wt_provider_idemkey_uk" {

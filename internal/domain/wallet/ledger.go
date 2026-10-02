@@ -50,7 +50,11 @@ func NewLedgerEntry(id, walletID, transactionID uuid.UUID, direction Direction, 
 	if err != nil {
 		return LedgerEntry{}, err
 	}
-	if cmp, _ := expected.Cmp(balanceAfter); cmp != 0 {
+	cmp, err := expected.Cmp(balanceAfter)
+	if err != nil {
+		return LedgerEntry{}, err
+	}
+	if cmp != 0 {
 		return LedgerEntry{}, fmt.Errorf("%w: saldo posterior inconsistente", domain.ErrInvalidMoney)
 	}
 	// O saldo de carteira nunca é negativo; um lançamento que terminasse abaixo de zero viola a invariante.

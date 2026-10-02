@@ -2,6 +2,7 @@ package idempotency
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 )
 
@@ -114,5 +115,21 @@ func TestHashRejectsBadInput(t *testing.T) {
 	op.Currency = "JPY"
 	if _, err := Hash(op); err == nil {
 		t.Fatal("moeda inválida aceita")
+	}
+}
+
+func TestHashHex(t *testing.T) {
+	op := baseOperation()
+	sum, err := Hash(op)
+	if err != nil {
+		t.Fatalf("Hash erro inesperado: %v", err)
+	}
+	got, err := HashHex(op)
+	if err != nil || got != hex.EncodeToString(sum[:]) {
+		t.Fatalf("HashHex = %q, erro = %v", got, err)
+	}
+	op.Amount = "25.0"
+	if got, err := HashHex(op); err == nil || got != "" {
+		t.Fatalf("HashHex inválido = %q, erro = %v", got, err)
 	}
 }
