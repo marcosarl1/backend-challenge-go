@@ -116,6 +116,29 @@ func scanWager(row interface{ Scan(...any) error }) (*wager.WagerTransaction, er
 		&r.CreatedAt, &r.UpdatedAt, &r.ResolvedAt); err != nil {
 		return nil, fmt.Errorf("lendo transação: %w", err)
 	}
+	return buildWager(r)
+}
+
+// scanWagerWithCorrelation lê a linha mais a correlação (só a retomada usa).
+func scanWagerWithCorrelation(row interface{ Scan(...any) error }, correlation *string) (*wager.WagerTransaction, error) {
+	var r wagerRow
+	var corr string
+	if err := row.Scan(&r.ID, &r.ProviderID, &r.ExternalID, &r.IdempotencyKey, &r.PayloadHash,
+		&r.WalletID, &r.PlayerID, &r.RoundID, &r.GameID, &r.Kind, &r.Currency, &r.AmountMinor,
+		&r.ReferenceExtID, &r.ResolvedRefID, &r.Status, &r.FailureCode, &r.FailureDetail,
+		&r.ResultBalance, &r.ResultVersion, &r.Attempts, &r.NextAttemptAt, &r.ExpiresAt,
+		&r.CreatedAt, &r.UpdatedAt, &r.ResolvedAt, &corr); err != nil {
+		return nil, fmt.Errorf("lendo transação: %w", err)
+	}
+	tx, err := buildWager(r)
+	if err != nil {
+		return nil, err
+	}
+	*correlation = corr
+	return tx, nil
+}
+
+func buildWager(r wagerRow) (*wager.WagerTransaction, error) {
 	id, err := fromPGUUID("id", r.ID)
 	if err != nil {
 		return nil, err
@@ -227,22 +250,44 @@ func (WagerStore) Save(ctx context.Context, db DBTX, tx *wager.WagerTransaction)
 	return nil
 }
 
-// ClaimDue reserva um lote de pendências vencidas para o worker, pulando as que outro worker já pegou. Sem lease separado: a transação que processa é a mesma que reserva (se ela morrer, a trava solta e outra assume).
-func (WagerStore) ClaimDue(ctx context.Context, db DBTX, now time.Time, limit int) ([]*wager.WagerTransaction, error) {
-	rows, err := db.Query(ctx, `SELECT `+wagerColumns+` FROM wager_transactions
+// ClaimDue reserva um lote de pendências vencidas para o worker, pulando as que outro worker já pegou. Sem lease separado: a transação que processa é a mesma que reserva (se ela morrer, a trava solta e outra assume). Ordena por carteira para travar sempre na mesma sequência.
+func (WagerStore) ClaimDue(ctx context.Context, db DBTX, now time.Time, limit int) ([]DueTransaction, error) {
+	rows, err := db.Query(ctx, `SELECT `+wagerColumns+`, correlation_id FROM wager_transactions
 		WHERE status IN ('PENDING', 'PENDING_REFERENCE') AND next_attempt_at <= $1
-		ORDER BY next_attempt_at LIMIT $2 FOR UPDATE SKIP LOCKED`, now, limit)
+		ORDER BY wallet_id, next_attempt_at LIMIT $2 FOR UPDATE SKIP LOCKED`, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("reservando pendências: %w", err)
 	}
 	defer rows.Close()
-	var out []*wager.WagerTransaction
+	var out []DueTransaction
 	for rows.Next() {
-		tx, err := scanWager(rows)
+		var due DueTransaction
+		var corr string
+		tx, err := scanWagerWithCorrelation(rows, &corr)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, tx)
+		due.Tx = tx
+		due.CorrelationID = corr
+		out = append(out, due)
 	}
 	return out, rows.Err()
+}
+
+// HasSuccessfulReversal diz se o alvo já tem uma reversão bem-sucedida.
+func (WagerStore) HasSuccessfulReversal(ctx context.Context, db DBTX, id uuid.UUID) (bool, error) {
+	var exists bool
+	err := db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM wager_transactions
+		WHERE resolved_reference_id = $1 AND status = 'PROCESSED'
+		  AND kind IN ('REFUND', 'ROLLBACK'))`, toPGUUID(id)).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("checando reversão: %w", err)
+	}
+	return exists, nil
+}
+
+// DueTransaction é uma pendência vencida com a correlação original.
+type DueTransaction struct {
+	Tx            *wager.WagerTransaction
+	CorrelationID string
 }

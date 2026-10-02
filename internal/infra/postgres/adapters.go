@@ -69,8 +69,20 @@ func (a wagerAdapter) Save(ctx context.Context, tx *wager.WagerTransaction) erro
 	return WagerStore{}.Save(ctx, a.db, tx)
 }
 
-func (a wagerAdapter) ClaimDue(ctx context.Context, now time.Time, limit int) ([]*wager.WagerTransaction, error) {
-	return WagerStore{}.ClaimDue(ctx, a.db, now, limit)
+func (a wagerAdapter) ClaimDue(ctx context.Context, now time.Time, limit int) ([]application.DueTransaction, error) {
+	dues, err := WagerStore{}.ClaimDue(ctx, a.db, now, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]application.DueTransaction, 0, len(dues))
+	for _, d := range dues {
+		out = append(out, application.DueTransaction{Tx: d.Tx, CorrelationID: d.CorrelationID})
+	}
+	return out, nil
+}
+
+func (a wagerAdapter) HasSuccessfulReversal(ctx context.Context, id uuid.UUID) (bool, error) {
+	return WagerStore{}.HasSuccessfulReversal(ctx, a.db, id)
 }
 
 type ledgerAdapter struct{ db DBTX }

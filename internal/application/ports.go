@@ -20,6 +20,12 @@ type WalletRepository interface {
 	UpdateBalance(ctx context.Context, w *wallet.Wallet, prevVersion int64, now time.Time) error
 }
 
+// DueTransaction é uma pendência vencida com a correlação original (para os eventos que a retomada emitir).
+type DueTransaction struct {
+	Tx            *wager.WagerTransaction
+	CorrelationID string
+}
+
 // WagerRepository é o que os casos de uso precisam das transações.
 type WagerRepository interface {
 	Insert(ctx context.Context, tx *wager.WagerTransaction, correlationID string) (bool, error)
@@ -27,7 +33,8 @@ type WagerRepository interface {
 	FindByProviderExternal(ctx context.Context, providerID, externalID string) (*wager.WagerTransaction, error)
 	FindByID(ctx context.Context, id uuid.UUID) (*wager.WagerTransaction, error)
 	Save(ctx context.Context, tx *wager.WagerTransaction) error
-	ClaimDue(ctx context.Context, now time.Time, limit int) ([]*wager.WagerTransaction, error)
+	ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueTransaction, error)
+	HasSuccessfulReversal(ctx context.Context, id uuid.UUID) (bool, error)
 }
 
 // LedgerRepository é o que os casos de uso precisam do ledger.

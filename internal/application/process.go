@@ -18,19 +18,19 @@ import (
 	"github.com/marcosarl1/backend-challenge-go/internal/domain/wallet"
 )
 
-// ProcessCommand é uma operação externa sem referência (BET, WIN direto e
-// LOSS). Reversões e prêmio com referência chegam na próxima etapa.
+// ProcessCommand é uma operação externa. BET e LOSS não aceitam referência; REFUND e ROLLBACK exigem; WIN aceita (opcional).
 type ProcessCommand struct {
-	ProviderID     string
-	ExternalID     string
-	IdempotencyKey string
-	PlayerID       uuid.UUID
-	WalletID       uuid.UUID
-	RoundID        string
-	GameID         string
-	Kind           wager.Kind
-	Amount         money.Money
-	CorrelationID  string
+	ProviderID          string
+	ExternalID          string
+	IdempotencyKey      string
+	PlayerID            uuid.UUID
+	WalletID            uuid.UUID
+	RoundID             string
+	GameID              string
+	Kind                wager.Kind
+	Amount              money.Money
+	ReferenceExternalID string
+	CorrelationID       string
 }
 
 // ProcessResult é o desfecho: concluída traz o saldo observado; rejeitada
@@ -74,6 +74,7 @@ func ExecuteInTx(ctx context.Context, r Repositories, clock Clock, ids IDGenerat
 		PlayerID: cmd.PlayerID.String(), WalletID: cmd.WalletID.String(),
 		RoundID: cmd.RoundID, GameID: cmd.GameID, Kind: string(cmd.Kind),
 		Amount: cmd.Amount.String(), Currency: string(cmd.Amount.Currency()),
+		ReferenceExt: cmd.ReferenceExternalID,
 	})
 	if err != nil {
 		return nil, err
@@ -86,7 +87,7 @@ func ExecuteInTx(ctx context.Context, r Repositories, clock Clock, ids IDGenerat
 		ID: txID, ProviderID: cmd.ProviderID, ExternalID: cmd.ExternalID,
 		IdempotencyKey: cmd.IdempotencyKey, PayloadHash: hash[:],
 		WalletID: cmd.WalletID, PlayerID: cmd.PlayerID, RoundID: cmd.RoundID, GameID: cmd.GameID,
-		Kind: cmd.Kind, Amount: cmd.Amount,
+		Kind: cmd.Kind, Amount: cmd.Amount, ReferenceExtID: cmd.ReferenceExternalID,
 	}, now)
 	if err != nil {
 		return nil, err
@@ -116,9 +117,19 @@ func checkCommand(cmd ProcessCommand, now time.Time) error {
 		return fmt.Errorf("%w: valor inválido: %w", ErrInvalidInput, domain.ErrUninitialized)
 	}
 	switch cmd.Kind {
-	case wager.KindBet, wager.KindWin, wager.KindLoss:
+	case wager.KindBet, wager.KindWin, wager.KindLoss, wager.KindRefund, wager.KindRollback:
 	default:
-		return fmt.Errorf("%w: tipo %q fora desta etapa", ErrInvalidInput, string(cmd.Kind))
+		return fmt.Errorf("%w: tipo %q", ErrInvalidInput, string(cmd.Kind))
+	}
+	switch cmd.Kind {
+	case wager.KindRefund, wager.KindRollback:
+		if cmd.ReferenceExternalID == "" {
+			return fmt.Errorf("%w: %s exige referência", ErrInvalidInput, string(cmd.Kind))
+		}
+	case wager.KindBet, wager.KindLoss:
+		if cmd.ReferenceExternalID != "" {
+			return fmt.Errorf("%w: %s não aceita referência", ErrInvalidInput, string(cmd.Kind))
+		}
 	}
 	return nil
 }
@@ -207,6 +218,9 @@ func processNew(ctx context.Context, r Repositories, ids IDGenerator, cmd Proces
 		return reject(ctx, r, ids, cmd, tx, w, now, wager.CodeCurrencyMismatch, "moeda diverge da carteira")
 	}
 	prev := w.Version()
+	if needsReference(cmd) {
+		return resolveReference(ctx, r, ids, cmd, tx, w, prev, now)
+	}
 	switch cmd.Kind {
 	case wager.KindLoss:
 		return processLoss(ctx, r, ids, cmd, tx, w, now)
@@ -228,8 +242,127 @@ func processNew(ctx context.Context, r Repositories, ids IDGenerator, cmd Proces
 	}
 }
 
-// commitMovement grava saldo, lançamento, transação concluída e os dois
-// eventos no mesmo passo, e devolve o retrato observado.
+// needsReference diz se o comando cita outra operação.
+func needsReference(cmd ProcessCommand) bool {
+	return cmd.Kind == wager.KindRefund || cmd.Kind == wager.KindRollback ||
+		(cmd.Kind == wager.KindWin && cmd.ReferenceExternalID != "")
+}
+
+// Política de espera pela referência: tenta de novo com espera crescente (base dobrando até o teto) e desiste no limite de tentativas ou no prazo.
+const (
+	pendingBaseDelay   = time.Second
+	pendingMaxDelay    = time.Minute
+	pendingTTL         = 10 * time.Minute
+	pendingMaxAttempts = 10
+)
+
+// backoff devolve quanto esperar antes da próxima tentativa, dado quantas já houve.
+func backoff(attempts int) time.Duration {
+	d := pendingBaseDelay << attempts
+	if d <= 0 || d > pendingMaxDelay {
+		return pendingMaxDelay
+	}
+	return d
+}
+
+// resolveReference cumpre o passo da referência: ausente ou pendente espera; terminada sem sucesso rejeita; processada decide aplicar ou rejeitar.
+func resolveReference(ctx context.Context, r Repositories, ids IDGenerator, cmd ProcessCommand, tx *wager.WagerTransaction, w *wallet.Wallet, prev int64, now time.Time) (*ProcessResult, error) {
+	ref, err := r.Wagers.FindByProviderExternal(ctx, cmd.ProviderID, cmd.ReferenceExternalID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return waitForReference(ctx, r, ids, cmd, tx, w, now)
+		}
+		return nil, err
+	}
+	switch ref.Status() {
+	case wager.StatusPending, wager.StatusPendingReference:
+		return waitForReference(ctx, r, ids, cmd, tx, w, now)
+	case wager.StatusRejected, wager.StatusFailed:
+		return reject(ctx, r, ids, cmd, tx, w, now, wager.CodeReferenceNotProcessed, "referência sem sucesso")
+	default:
+		return applyReversal(ctx, r, ids, cmd, tx, w, prev, ref, now)
+	}
+}
+
+// applyReversal decide e cumpre: credita, debita ou rejeita com o código.
+func applyReversal(ctx context.Context, r Repositories, ids IDGenerator, cmd ProcessCommand, tx *wager.WagerTransaction, w *wallet.Wallet, prev int64, ref *wager.WagerTransaction, now time.Time) (*ProcessResult, error) {
+	reversed, err := r.Wagers.HasSuccessfulReversal(ctx, ref.ID())
+	if err != nil {
+		return nil, err
+	}
+	outcome, err := wager.DecideReversal(tx, ref, reversed, w.Balance())
+	if err != nil {
+		return nil, err
+	}
+	switch outcome.Action {
+	case wager.ReversalApplyCredit:
+		if err := tx.ResolveReference(ref.ID()); err != nil {
+			return nil, err
+		}
+		entry, err := w.Credit(tx.ID(), cmd.Amount, now)
+		if err != nil {
+			return nil, err
+		}
+		return commitMovement(ctx, r, ids, cmd, tx, w, prev, entry, now)
+	case wager.ReversalApplyDebit:
+		if err := tx.ResolveReference(ref.ID()); err != nil {
+			return nil, err
+		}
+		entry, err := w.Debit(tx.ID(), cmd.Amount, now)
+		if err != nil {
+			return nil, err
+		}
+		return commitMovement(ctx, r, ids, cmd, tx, w, prev, entry, now)
+	default:
+		return reject(ctx, r, ids, cmd, tx, w, now, outcome.FailureCode, "reversão recusada")
+	}
+}
+
+// waitForReference registra a primeira espera, com a próxima tentativa e o prazo final, e avisa com o evento de pendência.
+func waitForReference(ctx context.Context, r Repositories, ids IDGenerator, cmd ProcessCommand, tx *wager.WagerTransaction, w *wallet.Wallet, now time.Time) (*ProcessResult, error) {
+	if err := tx.WaitForReference(now.Add(backoff(0)), now.Add(pendingTTL), now); err != nil {
+		return nil, err
+	}
+	if err := r.Wagers.Save(ctx, tx); err != nil {
+		return nil, err
+	}
+	eventID, err := ids.NewID()
+	if err != nil {
+		return nil, fmt.Errorf("gerando evento: %w", err)
+	}
+	envelope, err := events.NewTransactionPendingReference(eventID, tx.ID(), cmd.CorrelationID, now, events.PendingReferenceData{
+		TransactionID: tx.ID(), ProviderID: cmd.ProviderID, ExternalTxID: cmd.ExternalID,
+		WalletID: w.ID(), ReferenceExtID: cmd.ReferenceExternalID,
+		Attempts: tx.Attempts(), NextAttemptAt: txNext(tx), ExpiresAt: txExpires(tx),
+	})
+	if err != nil {
+		return nil, err
+	}
+	payload, err := envelope.PayloadJSON()
+	if err != nil {
+		return nil, fmt.Errorf("serializando espera: %w", err)
+	}
+	if err := r.Outbox.Insert(ctx, OutboxEvent{
+		ID: eventID, AggregateType: AggregateWager, AggregateID: tx.ID(),
+		EventType: events.TypeTransactionPendingReference, EventVersion: events.Version,
+		OrderingKey: cmd.WalletID.String(), CorrelationID: cmd.CorrelationID,
+		Payload: payload, OccurredAt: now,
+	}, now); err != nil {
+		return nil, err
+	}
+	return &ProcessResult{TransactionID: tx.ID(), Status: wager.StatusPendingReference,
+		Balance: w.Balance(), WalletVersion: w.Version()}, nil
+}
+
+func txNext(tx *wager.WagerTransaction) (t time.Time) {
+	next, _, _ := tx.NextAttempt()
+	return next
+}
+
+func txExpires(tx *wager.WagerTransaction) (t time.Time) {
+	_, expires, _ := tx.NextAttempt()
+	return expires
+}
 func commitMovement(ctx context.Context, r Repositories, ids IDGenerator, cmd ProcessCommand, tx *wager.WagerTransaction, w *wallet.Wallet, prev int64, entry wallet.LedgerEntry, now time.Time) (*ProcessResult, error) {
 	if err := r.Wallets.UpdateBalance(ctx, w, prev, now); err != nil {
 		return nil, err
