@@ -1,0 +1,10 @@
+DROP TRIGGER IF EXISTS ledger_no_update ON wallet_ledger_entries;
+DROP TRIGGER IF EXISTS ledger_no_delete ON wallet_ledger_entries;
+DROP TRIGGER IF EXISTS ledger_no_truncate ON wallet_ledger_entries;
+DROP TRIGGER IF EXISTS wager_tx_terminal_immutable ON wager_transactions;
+DROP FUNCTION IF EXISTS forbid_ledger_mutation();
+DROP FUNCTION IF EXISTS forbid_terminal_tx_change();
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM app;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM app;
+REVOKE ALL ON SCHEMA public FROM app;
+DROP ROLE IF EXISTS app;

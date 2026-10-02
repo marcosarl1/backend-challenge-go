@@ -14,7 +14,8 @@ dist/
 .env.*.local
 
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 *.swp
 *.swo
 *~
