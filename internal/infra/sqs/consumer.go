@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/marcosarl1/backend-challenge-go/internal/application"
+	"github.com/marcosarl1/backend-challenge-go/internal/platform/observability"
 )
 
 // QueueOps é o que o consumidor precisa da fila. O cliente real implementa; o teste de recuperação injeta um dublê que falha sob comando.
@@ -26,21 +27,30 @@ type Consumer struct {
 	uow          application.UnitOfWork
 	clock        application.Clock
 	ids          application.IDGenerator
+	logger       *slog.Logger
 	workers      int
 	pollSeconds  int
 }
 
 // NewConsumer monta o consumidor. workers limita quantas mensagens andam juntas; pollSeconds é a espera longa de cada puxada.
 func NewConsumer(queues QueueOps, queueURL, dlqURL, consumerName string, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, workers, pollSeconds int) *Consumer {
+	return NewConsumerWithLogger(queues, queueURL, dlqURL, consumerName, uow, clock, ids, workers, pollSeconds, slog.Default())
+}
+
+// NewConsumerWithLogger monta o consumidor com logger estruturado.
+func NewConsumerWithLogger(queues QueueOps, queueURL, dlqURL, consumerName string, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, workers, pollSeconds int, logger *slog.Logger) *Consumer {
 	if workers < 1 {
 		workers = 1
 	}
 	if pollSeconds < 1 {
 		pollSeconds = 1
 	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Consumer{queues: queues, queueURL: queueURL, dlqURL: dlqURL,
 		consumerName: consumerName, uow: uow, clock: clock, ids: ids,
-		workers: workers, pollSeconds: pollSeconds}
+		workers: workers, pollSeconds: pollSeconds, logger: logger}
 }
 
 // Run puxa e aplica até o contexto acabar. Para de buscar ao cancelar e termina o lote em voo antes de voltar.
@@ -74,12 +84,20 @@ func (c *Consumer) Run(ctx context.Context) error {
 // handle trata uma mensagem: inválida vai para a DLQ com motivo; repetida com o mesmo conteúdo confirma sem reexecutar; com outro conteúdo é veneno e vai para a DLQ; o resto segue para o caso de uso na transação.
 
 func (c *Consumer) handle(ctx context.Context, msg Received) {
+	ctx = observability.WithFields(ctx, slog.String("messageId", msg.MessageID))
 	cmd, hash, err := parseEnvelope([]byte(msg.Body))
 	if err != nil {
 		c.toDLQ(ctx, msg, "envelope inválido: "+err.Error())
 		return
 	}
+	ctx = observability.WithFields(ctx,
+		slog.String("messageId", cmd.MessageID),
+		slog.String("correlationId", cmd.Command.CorrelationID),
+		slog.String("providerId", cmd.Command.ProviderID),
+		slog.String("walletId", cmd.Command.WalletID.String()),
+	)
 	var poison string
+	var transactionID string
 	err = c.uow.Do(ctx, func(ctx context.Context, r application.Repositories) error {
 		inserted, err := r.Inbox.Insert(ctx, c.consumerName, cmd.MessageID, hash, c.clock.Now())
 		if err != nil {
@@ -95,19 +113,24 @@ func (c *Consumer) handle(ctx context.Context, msg Received) {
 			}
 			return nil
 		}
-		_, err = application.ExecuteInTx(ctx, r, c.clock, c.ids, cmd.Command)
+		result, err := application.ExecuteInTx(ctx, r, c.clock, c.ids, cmd.Command)
+		if result != nil {
+			transactionID = result.TransactionID.String()
+		}
 		return err
 	})
+	if transactionID != "" {
+		ctx = observability.WithFields(ctx, slog.String("transactionId", transactionID))
+	}
 	if err != nil {
 		if isPermanent(err) {
 			c.toDLQ(ctx, msg, "permanente: "+err.Error())
 			return
 		}
 		// Transitório: solta com espera crescente pela contagem de recebimentos; esgotada, o redrive leva para a DLQ sozinho.
-		slog.ErrorContext(ctx, "consumidor: soltando para retry",
-			"messageId", msg.MessageID, "body", firstBytes(msg.Body, 120), "error", fmt.Sprintf("%#v", err))
+		c.logger.ErrorContext(ctx, "consumidor: soltando para retry", "error", err)
 		if rerr := c.release(ctx, msg, backoffDelay(msg.ReceiveCount)); rerr != nil {
-			slog.ErrorContext(ctx, "consumidor: soltura falhou", "messageId", msg.MessageID, "error", rerr)
+			c.logger.ErrorContext(ctx, "consumidor: soltura falhou", "error", rerr)
 		}
 		return
 	}
@@ -116,34 +139,38 @@ func (c *Consumer) handle(ctx context.Context, msg Received) {
 		return
 	}
 	if derr := c.queues.Delete(ctx, c.queueURL, msg.ReceiptHandle); derr != nil {
-		slog.ErrorContext(ctx, "consumidor: delete falhou", "messageId", msg.MessageID, "error", derr)
+		c.logger.ErrorContext(ctx, "consumidor: delete falhou", "error", derr)
 		if ctx.Err() != nil {
 			if rerr := c.release(ctx, msg, 0); rerr != nil {
-				slog.ErrorContext(ctx, "consumidor: soltura após cancelamento falhou", "messageId", msg.MessageID, "error", rerr)
+				c.logger.ErrorContext(ctx, "consumidor: soltura após cancelamento falhou", "error", rerr)
 			}
 		}
+		return
 	}
+	c.logger.InfoContext(ctx, "mensagem confirmada")
 }
 
 // toDLQ copia para a DLQ com o motivo e tira a original da fila.
 func (c *Consumer) toDLQ(ctx context.Context, msg Received, reason string) {
 	if serr := c.queues.SendDLQ(ctx, c.dlqURL, msg.Body, reason, msg.MessageID); serr != nil {
-		slog.ErrorContext(ctx, "consumidor: envio à DLQ falhou", "messageId", msg.MessageID, "error", serr)
+		c.logger.ErrorContext(ctx, "consumidor: envio à DLQ falhou", "error", serr)
 		if ctx.Err() != nil {
 			if rerr := c.release(ctx, msg, 0); rerr != nil {
-				slog.ErrorContext(ctx, "consumidor: soltura após cancelamento falhou", "messageId", msg.MessageID, "error", rerr)
+				c.logger.ErrorContext(ctx, "consumidor: soltura após cancelamento falhou", "error", rerr)
 			}
 		}
 		return
 	}
 	if derr := c.queues.Delete(ctx, c.queueURL, msg.ReceiptHandle); derr != nil {
-		slog.ErrorContext(ctx, "consumidor: delete após DLQ falhou", "messageId", msg.MessageID, "error", derr)
+		c.logger.ErrorContext(ctx, "consumidor: delete após DLQ falhou", "error", derr)
 		if ctx.Err() != nil {
 			if rerr := c.release(ctx, msg, 0); rerr != nil {
-				slog.ErrorContext(ctx, "consumidor: soltura após cancelamento falhou", "messageId", msg.MessageID, "error", rerr)
+				c.logger.ErrorContext(ctx, "consumidor: soltura após cancelamento falhou", "error", rerr)
 			}
 		}
+		return
 	}
+	c.logger.InfoContext(ctx, "mensagem enviada à DLQ")
 }
 
 // release libera a mensagem e usa um prazo independente se o trabalho foi cancelado.
@@ -167,14 +194,6 @@ func backoffDelay(receiveCount int) int {
 		return 60
 	}
 	return delay
-}
-
-// firstBytes corta o corpo para o log (sem despejar payload financeiro).
-func firstBytes(s string, n int) string {
-	if len(s) > n {
-		return s[:n] + "…"
-	}
-	return s
 }
 
 func equalHash(a, b []byte) bool {

@@ -1,12 +1,21 @@
 package sqs
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/marcosarl1/backend-challenge-go/internal/application"
+	"github.com/marcosarl1/backend-challenge-go/internal/platform/observability"
 )
+
+const validEnvelope = `{"messageId":"m-1","type":"WagerTransactionRequested","occurredAt":"2026-09-08T12:00:00Z",` +
+	`"data":{"providerId":"provider-a","externalTransactionId":"t-1","idempotencyKey":"k-1",` +
+	`"playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","walletId":"0192f291-27dd-7d3f-8071-5f8685deef37",` +
+	`"roundId":"r-1","gameId":"jogo","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}}`
 
 func TestBackoffDelay(t *testing.T) {
 	if got := backoffDelay(1); got != 1 {
@@ -56,11 +65,7 @@ func TestReleaseUsesIndependentContextAfterCancellation(t *testing.T) {
 }
 
 func TestParseEnvelope(t *testing.T) {
-	raw := `{"messageId":"m-1","type":"WagerTransactionRequested","occurredAt":"2026-09-08T12:00:00Z",` +
-		`"data":{"providerId":"provider-a","externalTransactionId":"t-1","idempotencyKey":"k-1",` +
-		`"playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","walletId":"0192f291-27dd-7d3f-8071-5f8685deef37",` +
-		`"roundId":"r-1","gameId":"jogo","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}}`
-	cmd, hash, err := parseEnvelope([]byte(raw))
+	cmd, hash, err := parseEnvelope([]byte(validEnvelope))
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -78,6 +83,48 @@ func TestParseEnvelope(t *testing.T) {
 	} {
 		if _, _, err := parseEnvelope([]byte(body)); !errors.Is(err, application.ErrInvalidInput) {
 			t.Fatalf("%s erro = %v", name, err)
+		}
+	}
+}
+
+type failingUnitOfWork struct{}
+
+func (failingUnitOfWork) Do(context.Context, func(context.Context, application.Repositories) error) error {
+	return errors.New("banco indisponível")
+}
+
+func TestConsumerRetryLogOmitsMessageBody(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(observability.NewJSONHandler(&output))
+	consumer := NewConsumerWithLogger(&releaseQueue{}, "queue", "dlq", "consumer", failingUnitOfWork{}, nil, nil, 1, 1, logger)
+	consumer.handle(context.Background(), Received{MessageID: "sqs-1", ReceiptHandle: "receipt", Body: validEnvelope, ReceiveCount: 1})
+
+	line := output.String()
+	for _, value := range []string{`"messageId":"m-1"`, `"correlationId":"m-1"`, `"providerId":"provider-a"`, `"walletId":"0192f291-27dd-7d3f-8071-5f8685deef37"`} {
+		if !strings.Contains(line, value) {
+			t.Errorf("log sem %s: %s", value, line)
+		}
+	}
+	for _, sensitive := range []string{`"body"`, `"money"`, `"amount"`, "25.00", "k-1"} {
+		if strings.Contains(line, sensitive) {
+			t.Errorf("log contém dado sensível %s: %s", sensitive, line)
+		}
+	}
+}
+
+func TestConsumerDLQLogOmitsInvalidBody(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(observability.NewJSONHandler(&output))
+	consumer := NewConsumerWithLogger(&releaseQueue{}, "queue", "dlq", "consumer", nil, nil, nil, 1, 1, logger)
+	consumer.handle(context.Background(), Received{MessageID: "sqs-1", ReceiptHandle: "receipt", Body: `Bearer private-token {"amount":"25.00"}`})
+
+	line := output.String()
+	if !strings.Contains(line, `"messageId":"sqs-1"`) {
+		t.Fatalf("log sem messageId: %s", line)
+	}
+	for _, sensitive := range []string{"private-token", "25.00", `"body"`} {
+		if strings.Contains(line, sensitive) {
+			t.Errorf("log contém dado sensível %s: %s", sensitive, line)
 		}
 	}
 }

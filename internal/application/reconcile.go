@@ -20,7 +20,7 @@ type ReconciliationReport struct {
 	CheckedEntries int64
 }
 
-// Reconcile refaz o saldo a partir do ledger e compara com o guardado, tudo no mesmo objeto. Em divergência, registra no log (a métrica chega com a observabilidade) e sinaliza no relatório, sem encostar no saldo.
+// Reconcile refaz o saldo a partir do ledger e compara com o guardado, tudo no mesmo objeto. Em divergência, registra no log e sinaliza no relatório, sem encostar no saldo.
 func Reconcile(ctx context.Context, uow UnitOfWork, logger *slog.Logger, ident Identity, walletID uuid.UUID) (*ReconciliationReport, error) {
 	if err := requireInternal(ident); err != nil {
 		return nil, err
@@ -59,9 +59,7 @@ func Reconcile(ctx context.Context, uow UnitOfWork, logger *slog.Logger, ident I
 		if !out.Consistent {
 			logger.ErrorContext(ctx, "divergência na reconciliação",
 				"walletId", walletID.String(),
-				"stored", stored.String(),
-				"calculated", calculated.String(),
-				"difference", difference.String(),
+				"consistent", false,
 				"checkedEntries", snap.Entries)
 		}
 		return nil

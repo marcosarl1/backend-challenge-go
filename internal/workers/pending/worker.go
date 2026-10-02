@@ -15,17 +15,26 @@ type Worker struct {
 	ids       application.IDGenerator
 	batchSize int
 	interval  time.Duration
+	logger    *slog.Logger
 }
 
 // NewWorker monta com lote e intervalo de varredura.
 func NewWorker(uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, batchSize int, interval time.Duration) *Worker {
+	return NewWorkerWithLogger(uow, clock, ids, batchSize, interval, slog.Default())
+}
+
+// NewWorkerWithLogger monta o worker com logger estruturado.
+func NewWorkerWithLogger(uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, batchSize int, interval time.Duration, logger *slog.Logger) *Worker {
 	if batchSize < 1 {
 		batchSize = 10
 	}
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	return &Worker{uow: uow, clock: clock, ids: ids, batchSize: batchSize, interval: interval}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Worker{uow: uow, clock: clock, ids: ids, batchSize: batchSize, interval: interval, logger: logger}
 }
 
 // RunOnce faz uma passada e devolve quantas saíram da espera.
@@ -43,9 +52,9 @@ func (w *Worker) Run(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			if n, err := w.RunOnce(ctx); err != nil {
-				slog.ErrorContext(ctx, "retomada falhou", "error", err)
+				w.logger.ErrorContext(ctx, "retomada falhou", "error", err)
 			} else if n > 0 {
-				slog.InfoContext(ctx, "pendências retomadas", "count", n)
+				w.logger.InfoContext(ctx, "pendências retomadas", "count", n)
 			}
 		}
 	}

@@ -161,27 +161,28 @@ type httpParams struct {
 	Auth   *auth.Verifier
 	Clock  application.Clock
 	IDs    application.IDGenerator
+	Logger *slog.Logger
 	Checks []httpapi.HealthChecker `group:"health"`
 }
 
 func newHTTPHandler(p httpParams) http.Handler {
-	return httpapi.New(p.UOW, p.Auth, p.Clock, p.IDs, p.Checks...).Handler()
+	return httpapi.NewWithLogger(p.UOW, p.Auth, p.Clock, p.IDs, p.Logger, p.Checks...).Handler()
 }
 
 func newHTTPServer(handler http.Handler, cfg config.Config) *http.Server {
 	return httpapi.NewHTTPServer(handler, cfg.HTTPAddr)
 }
 
-func newConsumer(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator) *sqsinfra.Consumer {
-	return sqsinfra.NewConsumer(client, urls.transactions, urls.dlq, cfg.ConsumerName, uow, clock, ids, cfg.ConsumerWorkers, int(cfg.ConsumerPoll.Seconds()))
+func newConsumer(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, logger *slog.Logger) *sqsinfra.Consumer {
+	return sqsinfra.NewConsumerWithLogger(client, urls.transactions, urls.dlq, cfg.ConsumerName, uow, clock, ids, cfg.ConsumerWorkers, int(cfg.ConsumerPoll.Seconds()), logger)
 }
 
-func newOutboxPublisher(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock) *outbox.Publisher {
-	return outbox.NewPublisher(outbox.ClientSender{Client: client}, urls.events, uow, clock, cfg.OutboxOwner)
+func newOutboxPublisher(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, logger *slog.Logger) *outbox.Publisher {
+	return outbox.NewPublisherWithLogger(outbox.ClientSender{Client: client}, urls.events, uow, clock, cfg.OutboxOwner, logger)
 }
 
-func newPendingWorker(cfg config.Config, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator) *pending.Worker {
-	return pending.NewWorker(uow, clock, ids, cfg.RetryBatch, cfg.RetryInterval)
+func newPendingWorker(cfg config.Config, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, logger *slog.Logger) *pending.Worker {
+	return pending.NewWorkerWithLogger(uow, clock, ids, cfg.RetryBatch, cfg.RetryInterval, logger)
 }
 
 // runtimeParams reúne as dependências do ciclo de vida da aplicação.
@@ -194,6 +195,7 @@ type runtimeParams struct {
 	Consumer  *sqsinfra.Consumer
 	Publisher *outbox.Publisher
 	Retry     *pending.Worker
+	Logger    *slog.Logger
 	Config    config.Config
 }
 
@@ -203,13 +205,16 @@ func registerComponents(p runtimeParams) error {
 	if server == nil || server.Handler == nil || consumer == nil || publisher == nil || retry == nil {
 		return fmt.Errorf("registrando componentes: dependência ausente")
 	}
-	_, err := registerLifecycle(p.Lifecycle, p.Shutdown, server, p.Checks, p.Config,
+	managed, err := registerLifecycle(p.Lifecycle, p.Shutdown, server, p.Checks, p.Config,
 		componentRunner{name: "consumidor SQS", run: consumer.Run},
 		componentRunner{name: "publicador da outbox", run: func(ctx context.Context) error {
 			return publisher.Run(ctx, p.Config.OutboxInterval)
 		}},
 		componentRunner{name: "retomada de pendências", run: retry.Run},
 	)
+	if managed != nil {
+		managed.logger = p.Logger
+	}
 	return err
 }
 
@@ -234,6 +239,7 @@ type managedRuntime struct {
 	server   *http.Server
 	checks   []httpapi.HealthChecker
 	config   config.Config
+	logger   *slog.Logger
 	shutdown fx.Shutdowner
 	runners  []componentRunner
 	cancel   context.CancelFunc
@@ -275,13 +281,17 @@ func (r *managedRuntime) start(ctx context.Context) error {
 
 // launch executa um componente e solicita o encerramento se ele falhar.
 func (r *managedRuntime) launch(ctx context.Context, runner componentRunner) {
+	logger := r.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	r.workers.Add(1)
 	go func() {
 		defer r.workers.Done()
 		if err := runner.run(ctx); err != nil && ctx.Err() == nil {
-			slog.ErrorContext(ctx, "componente encerrou com falha", "component", runner.name, "error", err)
+			logger.ErrorContext(ctx, "componente encerrou com falha", "component", runner.name, "error", err)
 			if shutdownErr := r.shutdown.Shutdown(fx.ExitCode(1)); shutdownErr != nil {
-				slog.ErrorContext(ctx, "solicitação de encerramento falhou", "error", shutdownErr)
+				logger.ErrorContext(ctx, "solicitação de encerramento falhou", "error", shutdownErr)
 			}
 		}
 	}()

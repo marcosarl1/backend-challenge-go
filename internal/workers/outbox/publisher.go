@@ -10,6 +10,7 @@ import (
 
 	"github.com/marcosarl1/backend-challenge-go/internal/application"
 	"github.com/marcosarl1/backend-challenge-go/internal/infra/sqs"
+	"github.com/marcosarl1/backend-challenge-go/internal/platform/observability"
 )
 
 // ClientSender adapta o cliente SQS para a porta do publicador.
@@ -39,15 +40,24 @@ type Publisher struct {
 	leaseFor  time.Duration
 	baseDelay time.Duration
 	maxDelay  time.Duration
+	logger    *slog.Logger
 
 	AfterPublish func(id uuid.UUID) error
 }
 
 // NewPublisher monta o publicador dono de um nome único (hostname+pid, por exemplo) para disputar os arrendamentos.
 func NewPublisher(queues Sender, eventsURL string, uow application.UnitOfWork, clock application.Clock, owner string) *Publisher {
+	return NewPublisherWithLogger(queues, eventsURL, uow, clock, owner, slog.Default())
+}
+
+// NewPublisherWithLogger monta o publicador com logger estruturado.
+func NewPublisherWithLogger(queues Sender, eventsURL string, uow application.UnitOfWork, clock application.Clock, owner string, logger *slog.Logger) *Publisher {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Publisher{queues: queues, eventsURL: eventsURL, uow: uow, clock: clock,
 		owner: owner, batchSize: 10, leaseFor: 30 * time.Second,
-		baseDelay: time.Second, maxDelay: time.Minute}
+		baseDelay: time.Second, maxDelay: time.Minute, logger: logger}
 }
 
 // Run publica lotes até o contexto acabar.
@@ -60,7 +70,7 @@ func (p *Publisher) Run(ctx context.Context, interval time.Duration) error {
 			return nil
 		case <-ticker.C:
 			if _, err := p.RunOnce(ctx); err != nil {
-				slog.ErrorContext(ctx, "publicador: lote falhou", "error", err)
+				p.logger.ErrorContext(ctx, "publicador: lote falhou", "error", err)
 			}
 		}
 	}
@@ -83,11 +93,19 @@ func (p *Publisher) RunOnce(ctx context.Context) (int, error) {
 	}
 	published := 0
 	for _, event := range claimed {
-		if err := p.publishOne(ctx, event); err != nil {
-			slog.ErrorContext(ctx, "publicador: evento falhou",
-				"eventId", event.ID.String(), "error", err)
+		eventCtx := observability.WithFields(ctx,
+			slog.String("eventId", event.ID.String()),
+			slog.String("correlationId", event.CorrelationID),
+			slog.String("walletId", event.OrderingKey),
+		)
+		if event.AggregateType == application.AggregateWager {
+			eventCtx = observability.WithFields(eventCtx, slog.String("transactionId", event.AggregateID.String()))
+		}
+		if err := p.publishOne(eventCtx, event); err != nil {
+			p.logger.ErrorContext(eventCtx, "publicador: evento falhou", "error", err)
 			continue
 		}
+		p.logger.InfoContext(eventCtx, "evento publicado")
 		published++
 	}
 	return published, nil

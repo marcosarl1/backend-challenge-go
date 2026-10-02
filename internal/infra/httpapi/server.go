@@ -15,6 +15,7 @@ import (
 	"github.com/marcosarl1/backend-challenge-go/internal/domain/money"
 	"github.com/marcosarl1/backend-challenge-go/internal/domain/wager"
 	"github.com/marcosarl1/backend-challenge-go/internal/infra/auth"
+	"github.com/marcosarl1/backend-challenge-go/internal/platform/observability"
 )
 
 // Server expõe os casos de uso em HTTP. Handlers finos: parseiam, chamam e
@@ -24,6 +25,7 @@ type Server struct {
 	auth   Authenticator
 	clock  application.Clock
 	ids    application.IDGenerator
+	logger *slog.Logger
 	checks []HealthChecker
 }
 
@@ -35,7 +37,15 @@ type HealthChecker interface {
 
 // New monta o servidor sobre as dependências.
 func New(uow application.UnitOfWork, auth Authenticator, clock application.Clock, ids application.IDGenerator, checks ...HealthChecker) *Server {
-	return &Server{uow: uow, auth: auth, clock: clock, ids: ids, checks: checks}
+	return NewWithLogger(uow, auth, clock, ids, slog.Default(), checks...)
+}
+
+// NewWithLogger monta o servidor com logger estruturado.
+func NewWithLogger(uow application.UnitOfWork, auth Authenticator, clock application.Clock, ids application.IDGenerator, logger *slog.Logger, checks ...HealthChecker) *Server {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Server{uow: uow, auth: auth, clock: clock, ids: ids, logger: logger, checks: checks}
 }
 
 // NewHTTPServer monta o servidor HTTP com prazos: cabeçalho lento não prende
@@ -78,19 +88,20 @@ func (s *Server) withCorrelation(next http.Handler) http.Handler {
 			corr = uuid.NewString()
 		}
 		w.Header().Set("X-Correlation-Id", corr)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey("correlation"), corr)))
+		ctx := observability.WithFields(r.Context(), slog.String("correlationId", corr))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, ctxKey("correlation"), corr)))
 	})
 }
 
 // errPanic é o erro interno quando um handler estoura.
 var errPanic = errors.New("falha interna")
 
-// withAuth exige Bearer válido e guarda a identidade no contexto.
+// withRecover converte pânicos do handler em erro interno.
 func (s *Server) withRecover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				slog.ErrorContext(r.Context(), "pânico no handler",
+				s.logger.ErrorContext(r.Context(), "pânico no handler",
 					"path", r.URL.Path, "panic", recovered)
 				writeError(w, r, errPanic)
 			}
@@ -123,6 +134,8 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})
 }
+
+// withAuth exige Bearer válido e guarda a identidade no contexto.
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw := r.Header.Get("Authorization")
@@ -137,6 +150,9 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), identityKey, principal.Identity())
+		if principal.ProviderID != "" {
+			ctx = observability.WithFields(ctx, slog.String("providerId", principal.ProviderID))
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -169,6 +185,8 @@ func (s *Server) handleOpenWallet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	r = withLogFields(r, slog.String("walletId", res.WalletID.String()))
+	s.logger.InfoContext(r.Context(), "carteira aberta")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": res.WalletID.String(), "playerId": playerID.String(),
 		"balance": moneyDTO(res.Balance), "version": res.Version,
@@ -181,6 +199,7 @@ func (s *Server) handleGetWallet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	r = withLogFields(r, slog.String("walletId", id.String()))
 	view, err := application.GetWallet(r.Context(), s.uow, identityOf(r), id)
 	if err != nil {
 		writeError(w, r, err)
@@ -198,6 +217,7 @@ func (s *Server) handleListLedger(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	r = withLogFields(r, slog.String("walletId", id.String()))
 	limit := 0
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		limit, err = strconv.Atoi(raw)
@@ -229,7 +249,8 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	rep, err := application.Reconcile(r.Context(), s.uow, nil, identityOf(r), id)
+	r = withLogFields(r, slog.String("walletId", id.String()))
+	rep, err := application.Reconcile(r.Context(), s.uow, s.logger, identityOf(r), id)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -253,11 +274,18 @@ func (s *Server) handleProcess(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	r = withLogFields(r,
+		slog.String("providerId", cmd.ProviderID),
+		slog.String("walletId", cmd.WalletID.String()),
+	)
 	res, err := application.Execute(r.Context(), s.uow, s.clock, s.ids, identityOf(r), cmd)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
+	r = withLogFields(r, slog.String("transactionId", res.TransactionID.String()))
+	s.logger.InfoContext(r.Context(), "operação processada",
+		"kind", string(cmd.Kind), "status", string(res.Status), "idempotentReplay", res.IdempotentReplay)
 	out := map[string]any{
 		"transactionId": res.TransactionID.String(), "status": string(res.Status),
 		"balance": moneyDTO(res.Balance), "idempotentReplay": res.IdempotentReplay,
@@ -281,6 +309,7 @@ func (s *Server) handleGetTransaction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	r = withLogFields(r, slog.String("transactionId", id.String()))
 	view, err := application.GetTransaction(r.Context(), s.uow, identityOf(r), id)
 	if err != nil {
 		writeError(w, r, err)
@@ -290,6 +319,7 @@ func (s *Server) handleGetTransaction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetByExternal(w http.ResponseWriter, r *http.Request) {
+	r = withLogFields(r, slog.String("providerId", r.PathValue("providerId")))
 	view, err := application.GetTransactionByExternal(r.Context(), s.uow, identityOf(r),
 		r.PathValue("providerId"), r.PathValue("externalTransactionId"))
 	if err != nil {
@@ -301,6 +331,11 @@ func (s *Server) handleGetByExternal(w http.ResponseWriter, r *http.Request) {
 
 func moneyDTO(m money.Money) map[string]any {
 	return map[string]any{"amount": m.String(), "currency": string(m.Currency())}
+}
+
+// withLogFields acrescenta identificadores ao contexto da requisição.
+func withLogFields(r *http.Request, attrs ...slog.Attr) *http.Request {
+	return r.WithContext(observability.WithFields(r.Context(), attrs...))
 }
 
 func transactionDTO(view *application.TransactionView) map[string]any {
