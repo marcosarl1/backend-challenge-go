@@ -69,6 +69,16 @@ func makeDue(t *testing.T, txID uuid.UUID) {
 	}
 }
 
+// makeDueExt adianta por id externo.
+func makeDueExt(t *testing.T, externalID string) {
+	t.Helper()
+	conn := connect(t, ownerURL(t))
+	if _, err := conn.Exec(context.Background(), `UPDATE wager_transactions
+		SET next_attempt_at = now() - interval '1 second' WHERE external_transaction_id = $1`, externalID); err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+}
+
 func TestRefundBeforeBetResolvesLater(t *testing.T) {
 	cleanPendingTx(t)
 	refUniq := uuid.NewString()
