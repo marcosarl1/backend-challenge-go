@@ -11,7 +11,7 @@ import (
 )
 
 // Module monta o log em JSON (stdlib, sem dependência externa).
-var Module = fx.Module("observability", fx.Provide(NewLogger))
+var Module = fx.Module("observability", fx.Provide(NewLogger, NewMetrics))
 
 // NewLogger entrega o JSON para a saída padrão.
 func NewLogger() *slog.Logger {

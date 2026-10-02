@@ -28,6 +28,7 @@ type Consumer struct {
 	clock        application.Clock
 	ids          application.IDGenerator
 	logger       *slog.Logger
+	metrics      *observability.Metrics
 	workers      int
 	pollSeconds  int
 }
@@ -39,6 +40,11 @@ func NewConsumer(queues QueueOps, queueURL, dlqURL, consumerName string, uow app
 
 // NewConsumerWithLogger monta o consumidor com logger estruturado.
 func NewConsumerWithLogger(queues QueueOps, queueURL, dlqURL, consumerName string, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, workers, pollSeconds int, logger *slog.Logger) *Consumer {
+	return NewConsumerWithMetrics(queues, queueURL, dlqURL, consumerName, uow, clock, ids, workers, pollSeconds, logger, nil)
+}
+
+// NewConsumerWithMetrics monta o consumidor com logs e métricas.
+func NewConsumerWithMetrics(queues QueueOps, queueURL, dlqURL, consumerName string, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, workers, pollSeconds int, logger *slog.Logger, metrics *observability.Metrics) *Consumer {
 	if workers < 1 {
 		workers = 1
 	}
@@ -50,7 +56,7 @@ func NewConsumerWithLogger(queues QueueOps, queueURL, dlqURL, consumerName strin
 	}
 	return &Consumer{queues: queues, queueURL: queueURL, dlqURL: dlqURL,
 		consumerName: consumerName, uow: uow, clock: clock, ids: ids,
-		workers: workers, pollSeconds: pollSeconds, logger: logger}
+		workers: workers, pollSeconds: pollSeconds, logger: logger, metrics: metrics}
 }
 
 // Run puxa e aplica até o contexto acabar. Para de buscar ao cancelar e termina o lote em voo antes de voltar.
@@ -84,6 +90,10 @@ func (c *Consumer) Run(ctx context.Context) error {
 // handle trata uma mensagem: inválida vai para a DLQ com motivo; repetida com o mesmo conteúdo confirma sem reexecutar; com outro conteúdo é veneno e vai para a DLQ; o resto segue para o caso de uso na transação.
 
 func (c *Consumer) handle(ctx context.Context, msg Received) {
+	started := time.Now()
+	if c.metrics != nil {
+		defer func() { c.metrics.Latency("sqs_process", time.Since(started)) }()
+	}
 	ctx = observability.WithFields(ctx, slog.String("messageId", msg.MessageID))
 	cmd, hash, err := parseEnvelope([]byte(msg.Body))
 	if err != nil {
@@ -98,12 +108,16 @@ func (c *Consumer) handle(ctx context.Context, msg Received) {
 	)
 	var poison string
 	var transactionID string
+	var status string
+	var duplicate bool
 	err = c.uow.Do(ctx, func(ctx context.Context, r application.Repositories) error {
+		poison, transactionID, status, duplicate = "", "", "", false
 		inserted, err := r.Inbox.Insert(ctx, c.consumerName, cmd.MessageID, hash, c.clock.Now())
 		if err != nil {
 			return err
 		}
 		if !inserted {
+			duplicate = true
 			stored, err := r.Inbox.HashOf(ctx, c.consumerName, cmd.MessageID)
 			if err != nil {
 				return err
@@ -116,6 +130,8 @@ func (c *Consumer) handle(ctx context.Context, msg Received) {
 		result, err := application.ExecuteInTx(ctx, r, c.clock, c.ids, cmd.Command)
 		if result != nil {
 			transactionID = result.TransactionID.String()
+			status = string(result.Status)
+			duplicate = result.IdempotentReplay
 		}
 		return err
 	})
@@ -131,8 +147,18 @@ func (c *Consumer) handle(ctx context.Context, msg Received) {
 		c.logger.ErrorContext(ctx, "consumidor: soltando para retry", "error", err)
 		if rerr := c.release(ctx, msg, backoffDelay(msg.ReceiveCount)); rerr != nil {
 			c.logger.ErrorContext(ctx, "consumidor: soltura falhou", "error", rerr)
+		} else if c.metrics != nil {
+			c.metrics.Retry("sqs")
 		}
 		return
+	}
+	if c.metrics != nil {
+		if status != "" {
+			c.metrics.Result("sqs", status)
+		}
+		if duplicate && poison == "" {
+			c.metrics.Duplicate("sqs")
+		}
 	}
 	if poison != "" {
 		c.toDLQ(ctx, msg, poison)
@@ -171,6 +197,9 @@ func (c *Consumer) toDLQ(ctx context.Context, msg Received, reason string) {
 		return
 	}
 	c.logger.InfoContext(ctx, "mensagem enviada à DLQ")
+	if c.metrics != nil {
+		c.metrics.DLQ()
+	}
 }
 
 // release libera a mensagem e usa um prazo independente se o trabalho foi cancelado.

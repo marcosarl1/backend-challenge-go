@@ -21,12 +21,13 @@ import (
 // Server expõe os casos de uso em HTTP. Handlers finos: parseiam, chamam e
 // traduzem; regra mora na aplicação.
 type Server struct {
-	uow    application.UnitOfWork
-	auth   Authenticator
-	clock  application.Clock
-	ids    application.IDGenerator
-	logger *slog.Logger
-	checks []HealthChecker
+	uow     application.UnitOfWork
+	auth    Authenticator
+	clock   application.Clock
+	ids     application.IDGenerator
+	logger  *slog.Logger
+	metrics *observability.Metrics
+	checks  []HealthChecker
 }
 
 // HealthChecker é uma dependência que a prontidão confere.
@@ -42,10 +43,15 @@ func New(uow application.UnitOfWork, auth Authenticator, clock application.Clock
 
 // NewWithLogger monta o servidor com logger estruturado.
 func NewWithLogger(uow application.UnitOfWork, auth Authenticator, clock application.Clock, ids application.IDGenerator, logger *slog.Logger, checks ...HealthChecker) *Server {
+	return NewWithMetrics(uow, auth, clock, ids, logger, nil, checks...)
+}
+
+// NewWithMetrics monta o servidor com logs e métricas compartilhados pela aplicação.
+func NewWithMetrics(uow application.UnitOfWork, auth Authenticator, clock application.Clock, ids application.IDGenerator, logger *slog.Logger, metrics *observability.Metrics, checks ...HealthChecker) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{uow: uow, auth: auth, clock: clock, ids: ids, logger: logger, checks: checks}
+	return &Server{uow: uow, auth: auth, clock: clock, ids: ids, logger: logger, metrics: metrics, checks: checks}
 }
 
 // NewHTTPServer monta o servidor HTTP com prazos: cabeçalho lento não prende
@@ -244,6 +250,10 @@ func (s *Server) handleListLedger(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	if s.metrics != nil {
+		defer func() { s.metrics.Latency("reconcile", time.Since(started)) }()
+	}
 	id, err := parseUUID("walletId", r.PathValue("walletId"))
 	if err != nil {
 		writeError(w, r, err)
@@ -255,6 +265,9 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	if s.metrics != nil && !rep.Consistent {
+		s.metrics.Divergence()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"walletId":      rep.WalletID.String(),
 		"storedBalance": moneyDTO(rep.Stored), "calculatedBalance": moneyDTO(rep.Calculated),
@@ -264,6 +277,10 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleProcess(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	if s.metrics != nil {
+		defer func() { s.metrics.Latency("http_process", time.Since(started)) }()
+	}
 	var body ProcessRequest
 	if err := decode(r, &body); err != nil {
 		writeError(w, r, err)
@@ -284,6 +301,12 @@ func (s *Server) handleProcess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = withLogFields(r, slog.String("transactionId", res.TransactionID.String()))
+	if s.metrics != nil {
+		s.metrics.Result("http", string(res.Status))
+		if res.IdempotentReplay {
+			s.metrics.Duplicate("http")
+		}
+	}
 	s.logger.InfoContext(r.Context(), "operação processada",
 		"kind", string(cmd.Kind), "status", string(res.Status), "idempotentReplay", res.IdempotentReplay)
 	out := map[string]any{

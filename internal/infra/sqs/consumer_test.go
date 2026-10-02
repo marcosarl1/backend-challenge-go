@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -96,7 +98,8 @@ func (failingUnitOfWork) Do(context.Context, func(context.Context, application.R
 func TestConsumerRetryLogOmitsMessageBody(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(observability.NewJSONHandler(&output))
-	consumer := NewConsumerWithLogger(&releaseQueue{}, "queue", "dlq", "consumer", failingUnitOfWork{}, nil, nil, 1, 1, logger)
+	metrics := observability.NewMetrics()
+	consumer := NewConsumerWithMetrics(&releaseQueue{}, "queue", "dlq", "consumer", failingUnitOfWork{}, nil, nil, 1, 1, logger, metrics)
 	consumer.handle(context.Background(), Received{MessageID: "sqs-1", ReceiptHandle: "receipt", Body: validEnvelope, ReceiveCount: 1})
 
 	line := output.String()
@@ -110,12 +113,14 @@ func TestConsumerRetryLogOmitsMessageBody(t *testing.T) {
 			t.Errorf("log contém dado sensível %s: %s", sensitive, line)
 		}
 	}
+	checkMetric(t, metrics, `wager_retries_total{source="sqs"} 1`)
 }
 
 func TestConsumerDLQLogOmitsInvalidBody(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(observability.NewJSONHandler(&output))
-	consumer := NewConsumerWithLogger(&releaseQueue{}, "queue", "dlq", "consumer", nil, nil, nil, 1, 1, logger)
+	metrics := observability.NewMetrics()
+	consumer := NewConsumerWithMetrics(&releaseQueue{}, "queue", "dlq", "consumer", nil, nil, nil, 1, 1, logger, metrics)
 	consumer.handle(context.Background(), Received{MessageID: "sqs-1", ReceiptHandle: "receipt", Body: `Bearer private-token {"amount":"25.00"}`})
 
 	line := output.String()
@@ -126,6 +131,17 @@ func TestConsumerDLQLogOmitsInvalidBody(t *testing.T) {
 		if strings.Contains(line, sensitive) {
 			t.Errorf("log contém dado sensível %s: %s", sensitive, line)
 		}
+	}
+	checkMetric(t, metrics, "wager_dlq_total 1")
+}
+
+// checkMetric confere uma amostra emitida pelo handler Prometheus.
+func checkMetric(t *testing.T, metrics *observability.Metrics, sample string) {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(recorder.Body.String(), sample) {
+		t.Errorf("/metrics sem %s", sample)
 	}
 }
 

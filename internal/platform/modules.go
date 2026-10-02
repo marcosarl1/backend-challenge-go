@@ -41,7 +41,7 @@ var Module = fx.Module("platform",
 // DBModule configura o pool e as verificações do PostgreSQL.
 var DBModule = fx.Module("db",
 	fx.Provide(newPool),
-	fx.Provide(postgres.NewUnitOfWork),
+	fx.Provide(postgres.NewUnitOfWorkWithMetrics),
 	fx.Provide(fx.Annotate(postgres.NewPingChecker,
 		fx.As(new(httpapi.HealthChecker)), fx.ResultTags(`group:"health"`))),
 )
@@ -157,28 +157,29 @@ func newIDGenerator() application.IDGenerator { return application.UUIDv7Generat
 
 type httpParams struct {
 	fx.In
-	UOW    application.UnitOfWork
-	Auth   *auth.Verifier
-	Clock  application.Clock
-	IDs    application.IDGenerator
-	Logger *slog.Logger
-	Checks []httpapi.HealthChecker `group:"health"`
+	UOW     application.UnitOfWork
+	Auth    *auth.Verifier
+	Clock   application.Clock
+	IDs     application.IDGenerator
+	Logger  *slog.Logger
+	Metrics *observability.Metrics
+	Checks  []httpapi.HealthChecker `group:"health"`
 }
 
 func newHTTPHandler(p httpParams) http.Handler {
-	return httpapi.NewWithLogger(p.UOW, p.Auth, p.Clock, p.IDs, p.Logger, p.Checks...).Handler()
+	return httpapi.NewWithMetrics(p.UOW, p.Auth, p.Clock, p.IDs, p.Logger, p.Metrics, p.Checks...).Handler()
 }
 
 func newHTTPServer(handler http.Handler, cfg config.Config) *http.Server {
 	return httpapi.NewHTTPServer(handler, cfg.HTTPAddr)
 }
 
-func newConsumer(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, logger *slog.Logger) *sqsinfra.Consumer {
-	return sqsinfra.NewConsumerWithLogger(client, urls.transactions, urls.dlq, cfg.ConsumerName, uow, clock, ids, cfg.ConsumerWorkers, int(cfg.ConsumerPoll.Seconds()), logger)
+func newConsumer(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, logger *slog.Logger, metrics *observability.Metrics) *sqsinfra.Consumer {
+	return sqsinfra.NewConsumerWithMetrics(client, urls.transactions, urls.dlq, cfg.ConsumerName, uow, clock, ids, cfg.ConsumerWorkers, int(cfg.ConsumerPoll.Seconds()), logger, metrics)
 }
 
-func newOutboxPublisher(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, logger *slog.Logger) *outbox.Publisher {
-	return outbox.NewPublisherWithLogger(outbox.ClientSender{Client: client}, urls.events, uow, clock, cfg.OutboxOwner, logger)
+func newOutboxPublisher(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, logger *slog.Logger, metrics *observability.Metrics) *outbox.Publisher {
+	return outbox.NewPublisherWithMetrics(outbox.ClientSender{Client: client}, urls.events, uow, clock, cfg.OutboxOwner, logger, metrics)
 }
 
 func newPendingWorker(cfg config.Config, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, logger *slog.Logger) *pending.Worker {
@@ -196,6 +197,7 @@ type runtimeParams struct {
 	Publisher *outbox.Publisher
 	Retry     *pending.Worker
 	Logger    *slog.Logger
+	Metrics   *observability.Metrics
 	Config    config.Config
 }
 
@@ -214,8 +216,16 @@ func registerComponents(p runtimeParams) error {
 	)
 	if managed != nil {
 		managed.logger = p.Logger
+		managed.admin = httpapi.NewHTTPServer(newAdminHandler(p.Metrics), p.Config.MetricsAddr)
 	}
 	return err
+}
+
+// newAdminHandler expõe métricas apenas no listener administrativo.
+func newAdminHandler(metrics *observability.Metrics) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", metrics.Handler())
+	return mux
 }
 
 // componentRunner representa um loop iniciado e cancelado pelo runtime.
@@ -236,15 +246,17 @@ func registerLifecycle(lifecycle fx.Lifecycle, shutdown fx.Shutdowner, server *h
 
 // managedRuntime coordena os componentes durante o start e o shutdown.
 type managedRuntime struct {
-	server   *http.Server
-	checks   []httpapi.HealthChecker
-	config   config.Config
-	logger   *slog.Logger
-	shutdown fx.Shutdowner
-	runners  []componentRunner
-	cancel   context.CancelFunc
-	listener net.Listener
-	workers  sync.WaitGroup
+	server        *http.Server
+	admin         *http.Server
+	checks        []httpapi.HealthChecker
+	config        config.Config
+	logger        *slog.Logger
+	shutdown      fx.Shutdowner
+	runners       []componentRunner
+	cancel        context.CancelFunc
+	listener      net.Listener
+	adminListener net.Listener
+	workers       sync.WaitGroup
 }
 
 // start valida dependências, abre o listener e inicia os componentes gerenciados.
@@ -263,7 +275,16 @@ func (r *managedRuntime) start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("abrindo listener HTTP: %w", err)
 	}
+	var adminListener net.Listener
+	if r.admin != nil {
+		adminListener, err = net.Listen("tcp", r.admin.Addr)
+		if err != nil {
+			listener.Close()
+			return fmt.Errorf("abrindo listener de métricas: %w", err)
+		}
+	}
 	r.listener = listener
+	r.adminListener = adminListener
 	runCtx, stop := context.WithCancel(context.Background())
 	r.cancel = stop
 	r.launch(runCtx, componentRunner{name: "servidor HTTP", run: func(context.Context) error {
@@ -273,6 +294,15 @@ func (r *managedRuntime) start(ctx context.Context) error {
 		}
 		return err
 	}})
+	if adminListener != nil {
+		r.launch(runCtx, componentRunner{name: "servidor de métricas", run: func(context.Context) error {
+			err := r.admin.Serve(adminListener)
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
+		}})
+	}
 	for _, runner := range r.runners {
 		r.launch(runCtx, runner)
 	}
@@ -300,6 +330,11 @@ func (r *managedRuntime) launch(ctx context.Context, runner componentRunner) {
 // stop interrompe entradas, cancela os workers e aguarda seu término.
 func (r *managedRuntime) stop(ctx context.Context) error {
 	var stopErr error
+	if r.admin != nil {
+		if err := r.admin.Shutdown(ctx); err != nil {
+			stopErr = errors.Join(stopErr, err, r.admin.Close())
+		}
+	}
 	if r.server != nil {
 		stopErr = r.server.Shutdown(ctx)
 		if stopErr != nil {

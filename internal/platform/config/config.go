@@ -18,6 +18,7 @@ var Module = fx.Module("config", fx.Provide(Load))
 // Config carrega tudo do ambiente, com padrões para o compose local.
 type Config struct {
 	HTTPAddr        string
+	MetricsAddr     string
 	DatabaseURL     string
 	SQSEndpoint     string
 	SQSRegion       string
@@ -40,6 +41,7 @@ type Config struct {
 func Load() Config {
 	return Config{
 		HTTPAddr:        env("HTTP_ADDR", ":8081"),
+		MetricsAddr:     env("METRICS_ADDR", "127.0.0.1:9090"),
 		DatabaseURL:     env("DATABASE_URL", "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable"),
 		SQSEndpoint:     env("SQS_ENDPOINT", "http://localhost:4566"),
 		SQSRegion:       env("SQS_REGION", "us-east-1"),
@@ -72,6 +74,13 @@ func (c Config) Validate() error {
 	}
 	if _, _, err := net.SplitHostPort(c.HTTPAddr); err != nil {
 		invalid = append(invalid, fmt.Errorf("HTTP_ADDR inválido: %w", err))
+	}
+	if c.MetricsAddr != "" {
+		if _, _, err := net.SplitHostPort(c.MetricsAddr); err != nil {
+			invalid = append(invalid, fmt.Errorf("METRICS_ADDR inválido: %w", err))
+		} else if c.MetricsAddr == c.HTTPAddr {
+			invalid = append(invalid, errors.New("METRICS_ADDR deve usar porta separada de HTTP_ADDR"))
+		}
 	}
 	if parsed, err := url.Parse(c.DatabaseURL); err != nil || parsed.Scheme != "postgres" && parsed.Scheme != "postgresql" || parsed.Host == "" {
 		invalid = append(invalid, errors.New("DATABASE_URL deve ser uma URL PostgreSQL válida"))

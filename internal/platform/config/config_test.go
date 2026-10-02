@@ -24,6 +24,14 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRejectsSharedMetricsPort(t *testing.T) {
+	cfg := validConfig()
+	cfg.MetricsAddr = cfg.HTTPAddr
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "METRICS_ADDR") {
+		t.Fatalf("Validate() = %v, esperado erro de porta administrativa", err)
+	}
+}
+
 func TestConfigValidateRejectsInvalidRuntimeValues(t *testing.T) {
 	cfg := validConfig()
 	cfg.HTTPAddr = "invalid"

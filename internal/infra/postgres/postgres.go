@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/marcosarl1/backend-challenge-go/internal/platform/observability"
 )
 
 // DBTX é o que os repositórios precisam: funciona com o pool (fora de transação) e com a transação (dentro da unidade de trabalho).
@@ -62,12 +64,18 @@ func (c PingChecker) Check(ctx context.Context) error {
 
 // UnitOfWork amarra vários repositórios na mesma transação: ou tudo confirma junto, ou nada confirma. Conflito de escrita (40001/40P01) tenta de novo do zero, em transação nova.
 type UnitOfWork struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	metrics *observability.Metrics
 }
 
 // NewUnitOfWork monta a unidade sobre um pool aberto.
 func NewUnitOfWork(pool *pgxpool.Pool) *UnitOfWork {
 	return &UnitOfWork{pool: pool}
+}
+
+// NewUnitOfWorkWithMetrics monta a unidade com métricas de conflitos e retries.
+func NewUnitOfWorkWithMetrics(pool *pgxpool.Pool, metrics *observability.Metrics) *UnitOfWork {
+	return &UnitOfWork{pool: pool, metrics: metrics}
 }
 
 // Do executa fn dentro de uma transação e confirma no fim. Erro da função
@@ -79,8 +87,15 @@ func (u *UnitOfWork) Do(ctx context.Context, fn func(ctx context.Context, tx pgx
 		if err == nil {
 			return nil
 		}
+		var pgErr *pgconn.PgError
+		if u.metrics != nil && errors.As(err, &pgErr) && (pgErr.Code == "40001" || pgErr.Code == "40P01") {
+			u.metrics.Conflict()
+		}
 		if Classify(err) != ClassTransient || attempt == maxAttempts {
 			return err
+		}
+		if u.metrics != nil {
+			u.metrics.Retry("postgres")
 		}
 	}
 	return err
