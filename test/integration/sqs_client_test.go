@@ -7,6 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/google/uuid"
 
 	infrasqs "github.com/marcosarl1/backend-challenge-go/internal/infra/sqs"
@@ -26,9 +30,39 @@ func sqsClient(t *testing.T) (*infrasqs.Client, string) {
 	return client, url
 }
 
-func TestSQSClientRoundTrip(t *testing.T) {
-	client, url := sqsClient(t)
+// isolatedQueue cria uma fila própria para o teste, sem mensagens deixadas por outros cenários.
+func isolatedQueue(t *testing.T, prefix string) string {
+	t.Helper()
 	ctx := context.Background()
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
+		config.WithBaseEndpoint(sqsURL(t)))
+	if err != nil {
+		t.Fatalf("configurando fila: %v", err)
+	}
+	admin := awssqs.NewFromConfig(cfg)
+	queueName := prefix + "-" + uuid.NewString() + ".fifo"
+	queue, err := admin.CreateQueue(ctx, &awssqs.CreateQueueInput{QueueName: aws.String(queueName),
+		Attributes: map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "false"}})
+	if err != nil {
+		t.Fatalf("fila isolada: %v", err)
+	}
+	url := aws.ToString(queue.QueueUrl)
+	t.Cleanup(func() {
+		if _, err := admin.DeleteQueue(context.Background(), &awssqs.DeleteQueueInput{QueueUrl: aws.String(url)}); err != nil {
+			t.Errorf("apagando fila isolada: %v", err)
+		}
+	})
+	return url
+}
+
+func TestSQSClientRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	client, err := infrasqs.NewClient(ctx, sqsURL(t), "us-east-1")
+	if err != nil {
+		t.Fatalf("cliente: %v", err)
+	}
+	url := isolatedQueue(t, "roundtrip")
 	dedup := "go-" + uuid.NewString()
 
 	sent, err := client.Send(ctx, url, `{"teste":"testando"}`, "grupo-1", dedup)

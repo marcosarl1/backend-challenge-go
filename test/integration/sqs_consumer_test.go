@@ -30,14 +30,8 @@ func consumerDeps(t *testing.T) (postgres.Runner, string, string, *infrasqs.Clie
 	if err != nil {
 		t.Fatalf("fila: %v", err)
 	}
-	mainURL, err := client.ResolveQueue(ctx, infrasqs.MainQueue)
-	if err != nil {
-		t.Fatalf("fila: %v", err)
-	}
-	dlqURL, err := client.ResolveQueue(ctx, infrasqs.DLQQueue)
-	if err != nil {
-		t.Fatalf("fila: %v", err)
-	}
+	mainURL := isolatedQueue(t, "consumer-main")
+	dlqURL := isolatedQueue(t, "consumer-dlq")
 	return postgres.NewRunner(postgres.NewUnitOfWork(pool)), mainURL, dlqURL, client
 }
 
