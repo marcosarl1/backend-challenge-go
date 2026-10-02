@@ -31,6 +31,21 @@ services:
       retries: 20
       start_period: 10s
 
+  sqs-init:
+    image: docker.io/amazon/aws-cli:2.37.8
+    depends_on:
+      sqs:
+        condition: service_healthy
+    volumes:
+      - ./deploy/sqs/init-queues.sh:/init-queues.sh:ro
+    environment:
+      AWS_ENDPOINT_URL: http://sqs:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_EC2_METADATA_DISABLED: "true"
+    entrypoint: ["sh", "/init-queues.sh"]
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.7.5
     command: start-dev --import-realm
