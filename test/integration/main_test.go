@@ -35,6 +35,10 @@ var integrationBinary string
 
 // TestMain cria dependências isoladas, aplica o schema e compila o processo real uma vez.
 func TestMain(m *testing.M) {
+	// O filho dos testes de crash reutiliza a infraestrutura do pai, sem abrir outros containers.
+	if os.Getenv("WAGER_RECOVERY_CHILD") != "" {
+		os.Exit(m.Run())
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	cleanup, err := setupIntegration(ctx)
 	if err != nil {

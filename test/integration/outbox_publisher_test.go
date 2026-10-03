@@ -60,12 +60,12 @@ func cleanPendingOutbox(t *testing.T) {
 	}
 }
 
-func outboxState(t *testing.T, owner string) (published, pending int, attempts map[string]int) {
+// outboxState lê apenas os eventos da carteira criada pelo teste.
+func outboxState(t *testing.T, walletID uuid.UUID) (published, pending int, attempts map[string]int) {
 	t.Helper()
 	conn := connect(t, ownerURL(t))
-	_ = owner
 	rows, err := conn.Query(context.Background(),
-		`SELECT id::text, published_at IS NOT NULL, attempts FROM outbox_events`)
+		`SELECT id::text, published_at IS NOT NULL, attempts FROM outbox_events WHERE ordering_key = $1`, walletID.String())
 	if err != nil {
 		t.Fatalf("lendo outbox: %v", err)
 	}
@@ -112,8 +112,8 @@ func TestPublishersDispute(t *testing.T) {
 	wg.Wait()
 
 	// Os 4 eventos saíram, cada um reservado uma vez só (sem disputa dupla).
-	published, _, attempts := outboxState(t, "")
-	if published < 4 {
+	published, _, attempts := outboxState(t, walletID)
+	if published != 4 {
 		t.Fatalf("publicados = %d", published)
 	}
 	for id, n := range attempts {
@@ -140,7 +140,6 @@ func TestPublishCrashRepublishesSameID(t *testing.T) {
 	cleanPendingOutbox(t)
 	runner := openRunner(t)
 	walletID, playerID := fundWallet(t, runner, "1000.00")
-	_ = walletID
 	_ = playerID
 
 	sender := &recordingSender{}
@@ -162,7 +161,7 @@ func TestPublishCrashRepublishesSameID(t *testing.T) {
 	// Nada confirmado na queda: expira os arrendamentos e retoma.
 	conn := connect(t, ownerURL(t))
 	if _, err := conn.Exec(context.Background(),
-		`UPDATE outbox_events SET lease_until = now() - interval '1 second' WHERE published_at IS NULL`); err != nil {
+		`UPDATE outbox_events SET lease_until = now() - interval '1 second' WHERE ordering_key = $1 AND published_at IS NULL`, walletID.String()); err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
 	pub.AfterPublish = nil
@@ -179,8 +178,8 @@ func TestPublishCrashRepublishesSameID(t *testing.T) {
 			t.Fatalf("eventId %s enviado %dx", dedup, n)
 		}
 	}
-	published, pending, _ := outboxState(t, "")
-	if pending != 0 || published < len(byDedup) {
+	published, pending, _ := outboxState(t, walletID)
+	if pending != 0 || published != len(byDedup) {
 		t.Fatalf("publicados=%d pendentes=%d", published, pending)
 	}
 }
