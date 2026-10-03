@@ -41,15 +41,39 @@ funcionam.
 - Docker com Compose v2 e acesso ao daemon;
 - `make`, `curl` e Python 3.
 
-O Compose usa as portas `5432`, `4566` e `8080`. A aplicação usa `8081` para
-HTTP e `9090` para métricas.
+O Compose usa as portas `5432`, `4566` e `8080`. O serviço `app` publica
+`8081` para HTTP e `9090` para métricas.
 
 As credenciais do Compose são valores de teste para desenvolvimento local.
 Não use essa configuração contra uma conta AWS real.
 
 ## Início rápido
 
-Na raiz do repositório:
+Na raiz do repositório, suba o stack completo (infra + migrations + app):
+
+```bash
+cp .env.example .env
+make up-full
+```
+
+Ou, sem o Compose na primeira subida:
+
+```bash
+docker compose up --build
+```
+
+O `up` cria as filas (`wager-transactions.fifo`,
+`wager-transactions-provider-b.fifo`, `wager-transactions-dlq.fifo` e
+`wager-events.fifo`), aplica as migrations e inicia o `app`. Ele também
+ativa a autorização IAM do MiniStack e cria credenciais separadas para o
+serviço e para cada provedor em `.local/`, fora do Git. `provider-a` envia
+somente a `wager-transactions.fifo`, e `provider-b` somente a
+`wager-transactions-provider-b.fifo`. O consumidor confere o `providerId` do
+corpo contra a fila recebida antes da transação financeira.
+
+Para desenvolvimento no host (binário fora do Compose), use o fluxo
+alternativo — não rode junto com o `app` do Compose, pois ambos publicam
+`8081`/`9090`:
 
 ```bash
 cp .env.example .env
@@ -59,28 +83,19 @@ make migrate-up
 make run
 ```
 
-O `make up` inicia PostgreSQL, MiniStack e Keycloak e cria as filas:
+Nesse fluxo, `make up` inicia somente PostgreSQL, MiniStack e Keycloak e
+cria as filas. `make run` carrega apenas a credencial do serviço. Após
+reiniciar o MiniStack, execute `make up` antes de iniciar a aplicação.
 
-- `wager-transactions.fifo`;
-- `wager-transactions-provider-b.fifo`;
-- `wager-transactions-dlq.fifo`;
-- `wager-events.fifo`.
-
-Ele também ativa a autorização IAM do MiniStack e cria credenciais separadas
-para o serviço e para cada provedor em `.local/`, fora do Git. `provider-a`
-envia somente a `wager-transactions.fifo`, e `provider-b` somente a
-`wager-transactions-provider-b.fifo`. O consumidor confere o `providerId` do
-corpo contra a fila recebida antes da transação financeira. `make run`
-carrega apenas a credencial do serviço. Após reiniciar o MiniStack, execute
-`make up` antes de iniciar a aplicação.
-
-`make check-sqs-auth` envia e remove uma mensagem de prova em cada fila de entrada.
+`make check-sqs-auth` envia e remove uma mensagem de prova na fila de entrada.
 Ele verifica o isolamento entre provedores, o consumo pelo serviço e as
 ações inversas negadas. Rode o comando antes de iniciar a aplicação, com as
 filas de entrada vazias.
 
-As migrations não rodam automaticamente quando a aplicação inicia. Execute
-`make migrate-up` antes de iniciar o binário.
+As migrations não rodam automaticamente quando a aplicação inicia fora do
+Compose. Nesse fluxo, execute `make migrate-up` antes de iniciar o binário.
+No stack completo (`docker compose up --build` ou `make up-full`), o serviço
+`migrate` aplica as migrations antes do `app` iniciar.
 
 Em outro terminal, confirme a prontidão:
 
@@ -99,12 +114,56 @@ make down
 
 O comando encerra os containers e preserva o volume do PostgreSQL.
 
+## Réplicas
+
+O Compose sobe uma réplica do `app`. As garantias entre instâncias
+independentes são demonstradas pelos testes, que iniciam três processos com
+portas distintas sobre os mesmos containers:
+
+```bash
+go test -race -tags=integration -count=1 ./test/integration \
+  -run '^TestMultiInstanceConcurrency$' -v
+```
+
+Escalar o serviço no Compose (`--scale app=N`) exige um override que
+remova a publicação das portas `8081`/`9090` ou atribua um
+`HTTP_ADDR`/`METRICS_ADDR` distinto por réplica, pois duas réplicas não
+podem publicar a mesma porta do host.
+
+## Problemas comuns
+
+**`app` reiniciando com `UnrecognizedClientException` no SQS.** O MiniStack
+não tem volume: recriar o container `sqs` apaga os usuários IAM, mas os
+arquivos em `.local/` persistem no host e dessincronizam. O `sqs-init`
+regenera as chaves ao detectar a divergência, mas um container `app` já
+criado mantém as variáveis antigas. Recrie o `app` para absorver o arquivo
+atual:
+
+```bash
+docker compose up -d --force-recreate app
+```
+
+Em caso de dúvida, recrie tudo do zero (preserva o volume do banco):
+
+```bash
+docker compose down && make up-full
+```
+
 ## Configuração
 
 Use [.env.example](.env.example) como referência. O Compose lê `.env`; o
 binário não carrega esse arquivo sozinho. `make run` carrega
 `.local/sqs-service.env` para o cliente SQS. Os valores de exemplo coincidem
-com os padrões do binário.
+com os padrões do binário para execução no host.
+
+O serviço `app` do Compose não usa `.env` para endereços: ele tem
+hostnames internos fixos (`db`, `sqs`, `keycloak`) definidos no
+`compose.yaml`. A única exceção é a credencial do serviço, lida de
+`.local/sqs-service.env` via `env_file`. Por isso, `DATABASE_URL`,
+`SQS_ENDPOINT` e `OIDC_JWKS_URL` com `localhost` valem para `make run`;
+dentro do Compose valem os hostnames internos. `OIDC_ISSUER` permanece como
+`http://localhost:8080/realms/wagering` nos dois fluxos, porque o `iss` do
+token reflete o hostname usado na emissão.
 
 As variáveis mais usadas são:
 

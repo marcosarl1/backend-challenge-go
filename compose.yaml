@@ -70,13 +70,66 @@ services:
 
   migrate:
     image: docker.io/migrate/migrate:v4.20.1
-    profiles: ["tools"]
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - ./migrations:/migrations:ro
     entrypoint: ["migrate"]
+    # Roda automaticamente no `docker compose up` para que o stack completo
+    # suba sem passos manuais. `make migrate-up/down` continua funcionando
+    # (o `run` sobrescreve este command).
+    command: ["-path", "/migrations", "-database", "postgres://wagering:wagering@db:5432/wagering?sslmode=disable", "up"]
+    restart: "no"
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+      sqs:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      sqs-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8081:8081"
+      - "9090:9090"
+    # Credencial do serviço gerada pelo sqs-init. `required: false` tolera a
+    # ausência do arquivo na primeira criação; como o app só é criado após
+    # o sqs-init concluir, o arquivo já existe nesse momento.
+    env_file:
+      - path: ./.local/sqs-service.env
+        required: false
+    environment:
+      # Hostnames dentro da rede do Compose. O fluxo no host (`make run`)
+      # usa os valores de `.env.example`, com `localhost`.
+      HTTP_ADDR: ":8081"
+      METRICS_ADDR: ":9090"
+      DATABASE_URL: postgres://app:app@db:5432/wagering?sslmode=disable
+      SQS_ENDPOINT: http://sqs:4566
+      SQS_REGION: us-east-1
+      AWS_REGION: us-east-1
+      # O `iss` do token reflete o hostname usado para emiti-lo
+      # (`localhost` no host); só a busca do JWKS usa o hostname interno.
+      OIDC_ISSUER: http://localhost:8080/realms/wagering
+      OIDC_JWKS_URL: http://keycloak:8080/realms/wagering/protocol/openid-connect/certs
+      OIDC_AUDIENCE: wagering-api
+      CONSUMER_NAME: wager-consumer
+      CONSUMER_WORKERS: 4
+      OUTBOX_OWNER: outbox-1
+      SHUTDOWN_TIMEOUT: 15s
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/health/live >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.7.5

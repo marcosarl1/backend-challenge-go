@@ -1,4 +1,4 @@
-.PHONY: up down run check-sqs-auth migrate-up migrate-down test test-race test-integration vet fmt lint build
+.PHONY: up up-full down run check-sqs-auth migrate-up migrate-down test test-race test-integration vet fmt lint build
 
 MIGRATE_DATABASE_URL ?= postgres://wagering:wagering@db:5432/wagering?sslmode=disable
 
@@ -6,6 +6,12 @@ up:
 	mkdir -p .local
 	docker compose up -d db sqs keycloak
 	HOST_UID=$$(id -u) HOST_GID=$$(id -g) docker compose run --rm sqs-init
+
+# Stack completo (infra + migrations + app) sem passos manuais.
+# Não use junto com `make run`: ambos publicam as portas 8081/9090.
+up-full:
+	mkdir -p .local
+	HOST_UID=$$(id -u) HOST_GID=$$(id -g) docker compose up --build -d
 
 run:
 	@test -f .local/sqs-service.env || { echo "execute make up antes de make run"; exit 1; }

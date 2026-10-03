@@ -92,15 +92,27 @@ ensure_user() {
 }
 
 ensure_credentials() {
-	local name="$1" path="$2" old_keys="" pair=""
-	if [ -f "$path" ] && (
-		set -a
-		. "$path"
-		set +a
-		aws --endpoint-url "$ENDPOINT" --region "$REGION" \
-			sts get-caller-identity --query Arn --output text 2>/dev/null \
-			| grep -Fq ":user/$name"
-	); then
+	local name="$1" path="$2" old_keys="" pair="" current="" registered=""
+	# O MiniStack não tem volume: qualquer recriação do container apaga o
+	# IAM, mas o arquivo em .local/ persiste no host. Por isso a validação
+	# confere pela fonte autoritativa (chaves registradas do usuário) e não
+	# só pelo sts, que pode aceitar uma chave que já não existe mais.
+	if [ -f "$path" ]; then
+		current="$(sed -n 's/^AWS_ACCESS_KEY_ID=//p' "$path" | tail -n 1 | tr -d '\r')"
+	fi
+	registered="$(aws --endpoint-url "$ENDPOINT" --region "$REGION" \
+		iam list-access-keys --user-name "$name" \
+		--query 'AccessKeyMetadata[].AccessKeyId' --output text 2>/dev/null || true)"
+	if [ -n "$current" ] && [ "$registered" != "None" ] \
+		&& printf '%s' "$registered" | tr '\t\n' ' ' | grep -Fq "$current" \
+		&& [ -f "$path" ] && (
+			set -a
+			. "$path"
+			set +a
+			aws --endpoint-url "$ENDPOINT" --region "$REGION" \
+				sts get-caller-identity --query Arn --output text 2>/dev/null \
+				| grep -Fq ":user/$name"
+		); then
 		return
 	fi
 	old_keys="$(aws --endpoint-url "$ENDPOINT" --region "$REGION" \

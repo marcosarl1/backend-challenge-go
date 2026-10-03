@@ -145,10 +145,21 @@ exportação OTLP é opcional.
 
 ## Ambiente, testes e limites
 
-O Compose inicia PostgreSQL, MiniStack, Keycloak e a criação das filas. As
-migrations rodam por `make migrate-up`; a aplicação roda com `make run`, que
-carrega a credencial local do serviço. O Compose preserva o volume do banco ao parar e
-usa credenciais locais de teste. O README traz os comandos completos.
+O Compose inicia PostgreSQL, MiniStack, Keycloak, a criação das filas
+(`sqs-init`), as migrations (`migrate`) e o serviço `app`, nessa ordem via
+`depends_on` (`service_healthy` para infra, `service_completed_successfully`
+para os jobs curtos). `docker compose up --build` (ou `make up-full`) sobe
+o stack completo sem passos manuais; para desenvolvimento com o binário no
+host, `make up` sobe só a infra e `make run` inicia a aplicação. Os dois
+fluxos não podem rodar ao mesmo tempo, pois ambos publicam `8081`/`9090`.
+
+Dentro da rede do Compose, o `app` usa hostnames internos (`db`, `sqs`,
+`keycloak`); só `OIDC_ISSUER` permanece como `http://localhost:8080/...`,
+porque o `iss` do token reflete o hostname usado na emissão, enquanto a
+busca do JWKS usa `OIDC_JWKS_URL` interno. A credencial do serviço vem do
+arquivo gerado pelo `sqs-init` (`.local/sqs-service.env`, via `env_file`
+opcional). O Compose preserva o volume do banco ao parar e usa credenciais
+locais de teste. O README traz os comandos completos.
 O processo usa a role PostgreSQL `app`, com permissões limitadas; a role
 `wagering` é usada apenas para migrations.
 
@@ -162,8 +173,9 @@ Limites e trabalho não concluído:
 - O FIFO só deduplica dentro de sua janela; inbox e constraints do banco
   sustentam a idempotência durável.
 - As métricas são locais a cada réplica e reiniciam com o processo.
-- O Compose não inicia réplicas da aplicação; o teste multi-instância inicia
-  processos separados, e o README mostra a execução local de uma instância.
+- O Compose sobe uma réplica do `app` por padrão; escalar exige override de
+  portas/`HTTP_ADDR` distintos. A prova com três instâncias independentes
+  está nos testes multi-instância, não no Compose.
 - O cliente SQS ainda exige um endpoint configurado. Uma implantação em AWS
   precisa apontá-lo para a região correta e vincular roles às instâncias.
 
