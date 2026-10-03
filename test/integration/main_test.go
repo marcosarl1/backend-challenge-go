@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -221,6 +222,12 @@ func TestBinaryProcessStartsWithRealDependencies(t *testing.T) {
 
 // startAppProcess inicia uma instância em porta própria e a encerra no cleanup.
 func startAppProcess(t *testing.T) string {
+	base, _ := startAppProcessControlled(t)
+	return base
+}
+
+// startAppProcessControlled inicia uma instância que o teste também pode encerrar antes do cleanup.
+func startAppProcessControlled(t *testing.T, extraEnv ...string) (string, func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -233,11 +240,11 @@ func startAppProcess(t *testing.T) string {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(integrationBinary)
-	cmd.Env = append(os.Environ(), "HTTP_ADDR="+addr, "METRICS_ADDR=127.0.0.1:0",
+	cmd.Env = append(append(os.Environ(), "HTTP_ADDR="+addr, "METRICS_ADDR=127.0.0.1:0",
 		"DATABASE_URL="+os.Getenv("TEST_DATABASE_URL"), "SQS_ENDPOINT="+os.Getenv("TEST_SQS_ENDPOINT"),
 		"OIDC_ISSUER="+os.Getenv("TEST_KEYCLOAK_URL")+"/realms/wagering",
 		"OIDC_JWKS_URL="+os.Getenv("TEST_KEYCLOAK_URL")+"/realms/wagering/protocol/openid-connect/certs",
-		"OUTBOX_OWNER=integration-"+uuid.NewString())
+		"OUTBOX_OWNER=integration-"+uuid.NewString()), extraEnv...)
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
@@ -246,24 +253,28 @@ func startAppProcess(t *testing.T) string {
 	finished := make(chan struct{})
 	var waitErr error
 	go func() { waitErr = cmd.Wait(); close(finished) }()
-	t.Cleanup(func() {
-		select {
-		case <-finished:
-		default:
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-		}
-		select {
-		case <-finished:
-			if waitErr != nil {
-				t.Errorf("encerrando processo: %v", waitErr)
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			select {
+			case <-finished:
+			default:
+				_ = cmd.Process.Signal(syscall.SIGTERM)
 			}
-		case <-time.After(20 * time.Second):
-			_ = cmd.Process.Kill()
-			<-finished
-			t.Error("processo não encerrou após SIGTERM")
-		}
-		logFile.Close()
-	})
+			select {
+			case <-finished:
+				if waitErr != nil {
+					t.Errorf("encerrando processo: %v", waitErr)
+				}
+			case <-time.After(20 * time.Second):
+				_ = cmd.Process.Kill()
+				<-finished
+				t.Error("processo não encerrou após SIGTERM")
+			}
+			logFile.Close()
+		})
+	}
+	t.Cleanup(stop)
 	base := "http://" + addr
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
@@ -271,7 +282,7 @@ func startAppProcess(t *testing.T) string {
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				return base
+				return base, stop
 			}
 		}
 		select {
@@ -284,5 +295,5 @@ func startAppProcess(t *testing.T) string {
 	}
 	data, _ := os.ReadFile(logFile.Name())
 	t.Fatalf("liveness não respondeu: %s", data)
-	return ""
+	return "", stop
 }
