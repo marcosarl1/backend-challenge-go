@@ -40,6 +40,15 @@ func TestMain(m *testing.M) {
 	if os.Getenv("WAGER_RECOVERY_CHILD") != "" {
 		os.Exit(m.Run())
 	}
+	// A suíte usa o administrador do MiniStack isolado; o ambiente local usa um usuário IAM limitado.
+	if err := os.Setenv("AWS_ACCESS_KEY_ID", "test"); err != nil {
+		fmt.Fprintln(os.Stderr, "credencial de teste:", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("AWS_SECRET_ACCESS_KEY", "test"); err != nil {
+		fmt.Fprintln(os.Stderr, "credencial de teste:", err)
+		os.Exit(1)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	cleanup, err := setupIntegration(ctx)
 	if err != nil {

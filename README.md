@@ -1,0 +1,276 @@
+# Desafio Backend — Processamento Distribuído de Apostas em Go
+
+Serviço em Go para processar apostas e outros movimentos financeiros de
+carteiras de jogadores em um ambiente distribuído.
+
+A aplicação oferece uma API HTTP e um consumidor SQS. Os dois caminhos usam o
+mesmo caso de uso e persistem o resultado no PostgreSQL. O projeto também
+inclui autenticação OIDC, idempotência persistente, ledger append-only,
+transactional outbox, workers recuperáveis e testes com processos e
+dependências reais.
+
+## Documentação
+
+- [Arquitetura e decisões técnicas](ARCHITECTURE.md)
+- [Contratos de rejeição e eventos](docs/CONTRACTS.md)
+- [Exemplos de policies SQS para AWS](deploy/iam/README.md)
+- [Enunciado do desafio](docs/DESAFIO.md)
+- [Configuração do Keycloak](deploy/keycloak/README.md)
+
+O README explica como executar o projeto. A arquitetura explica como as
+garantias financeiras, a concorrência, a mensageria e o ciclo de vida
+funcionam.
+
+## Stack
+
+| Área | Tecnologia |
+| --- | --- |
+| Linguagem | Go 1.27.1 |
+| Composição | Uber Fx |
+| API | `net/http` |
+| Persistência | PostgreSQL com `pgx/v5` e SQL explícito |
+| Mensageria | AWS SQS via MiniStack |
+| Identidade | OAuth 2.0/OIDC via Keycloak |
+| Observabilidade | Prometheus e OpenTelemetry |
+| Ambiente local | Docker Compose |
+| Testes de integração | Testcontainers |
+
+## Pré-requisitos
+
+- Go 1.27.1;
+- Docker com Compose v2 e acesso ao daemon;
+- `make`, `curl` e Python 3.
+
+O Compose usa as portas `5432`, `4566` e `8080`. A aplicação usa `8081` para
+HTTP e `9090` para métricas.
+
+As credenciais do Compose são valores de teste para desenvolvimento local.
+Não use essa configuração contra uma conta AWS real.
+
+## Início rápido
+
+Na raiz do repositório:
+
+```bash
+cp .env.example .env
+make up
+make check-sqs-auth
+make migrate-up
+make run
+```
+
+O `make up` inicia PostgreSQL, MiniStack e Keycloak e cria as filas:
+
+- `wager-transactions.fifo`;
+- `wager-transactions-dlq.fifo`;
+- `wager-events.fifo`.
+
+Ele também ativa a autorização IAM do MiniStack, cria identidades locais para
+o serviço e o produtor SQS e grava as credenciais geradas em `.local/`, fora do
+Git. `make run` carrega a credencial limitada do serviço. Após reiniciar o
+MiniStack, execute `make up` antes de iniciar a aplicação.
+
+`make check-sqs-auth` envia e remove uma mensagem de prova na fila de entrada.
+Ele verifica que o produtor envia, o serviço consome e as ações inversas são
+negadas. Rode o comando antes de iniciar a aplicação, com a fila vazia.
+
+As migrations não rodam automaticamente quando a aplicação inicia. Execute
+`make migrate-up` antes de iniciar o binário.
+
+Em outro terminal, confirme a prontidão:
+
+```bash
+curl -fsS http://localhost:8081/health/ready
+```
+
+O liveness do processo fica em `GET /health/live`. As métricas ficam
+disponíveis em <http://127.0.0.1:9090/metrics>.
+
+Para encerrar o ambiente:
+
+```bash
+make down
+```
+
+O comando encerra os containers e preserva o volume do PostgreSQL.
+
+## Configuração
+
+Use [.env.example](.env.example) como referência. O Compose lê `.env`; o
+binário não carrega esse arquivo sozinho. `make run` carrega
+`.local/sqs-service.env` para o cliente SQS. Os valores de exemplo coincidem
+com os padrões do binário.
+
+As variáveis mais usadas são:
+
+- `DATABASE_URL`: conexão com o PostgreSQL;
+- `SQS_ENDPOINT`: endpoint do MiniStack;
+- `OIDC_ISSUER`, `OIDC_JWKS_URL` e `OIDC_AUDIENCE`: validação dos tokens;
+- `HTTP_ADDR`: listener da API;
+- `METRICS_ADDR`: listener das métricas;
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: endpoint OTLP; vazio desativa traces;
+- `SHUTDOWN_TIMEOUT`: prazo de encerramento do processo.
+
+`HTTP_ADDR` e `METRICS_ADDR` precisam usar portas diferentes. No Bash, altere
+uma variável apenas para o processo iniciado:
+
+```bash
+HTTP_ADDR=:8082 make run
+```
+
+O migrador roda dentro da rede do Compose. Para informar a URL local de forma explícita:
+
+```bash
+make migrate-up \
+  MIGRATE_DATABASE_URL='postgres://wagering:wagering@db:5432/wagering?sslmode=disable'
+```
+
+Para reverter uma migration:
+
+```bash
+make migrate-down
+```
+
+Cada execução reverte uma versão. Faça backup antes de usar esse comando em um
+banco com dados que precisam ser preservados.
+
+## Autenticação local
+
+O realm `wagering` fornece três clientes `client_credentials`:
+
+| Cliente | Permissão |
+| --- | --- |
+| `provider-a` | processa e consulta as próprias apostas |
+| `provider-b` | processa e consulta as próprias apostas |
+| `wallet-internal` | abre, consulta e reconcilia carteiras |
+
+As credenciais estão em
+[deploy/keycloak/README.md](deploy/keycloak/README.md). Gere os tokens no
+mesmo Bash em que fará as chamadas:
+
+```bash
+TOKEN_URL=http://localhost:8080/realms/wagering/protocol/openid-connect/token
+
+INTERNAL_TOKEN=$(curl -fsS "$TOKEN_URL" \
+  --data-urlencode 'grant_type=client_credentials' \
+  --data-urlencode 'client_id=wallet-internal' \
+  --data-urlencode 'client_secret=wallet-internal-secret' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+
+PROVIDER_TOKEN=$(curl -fsS "$TOKEN_URL" \
+  --data-urlencode 'grant_type=client_credentials' \
+  --data-urlencode 'client_id=provider-a' \
+  --data-urlencode 'client_secret=provider-a-secret' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+```
+
+## Fluxo rápido da API
+
+Abra uma carteira com o cliente interno:
+
+```bash
+PLAYER_ID=$(python3 -c 'import uuid; print(uuid.uuid4())')
+
+WALLET_JSON=$(curl -fsS http://localhost:8081/wallets \
+  --oauth2-bearer "$INTERNAL_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"playerId\":\"$PLAYER_ID\",\"initialBalance\":{\"amount\":\"100.00\",\"currency\":\"BRL\"}}")
+
+printf '%s\n' "$WALLET_JSON"
+WALLET_ID=$(printf '%s' "$WALLET_JSON" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+```
+
+Registre uma aposta com o cliente do provedor:
+
+```bash
+BET_ID=bet-demo-$(python3 -c 'import uuid; print(uuid.uuid4())')
+
+curl -fsS http://localhost:8081/wagering/transactions \
+  --oauth2-bearer "$PROVIDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: provider-a:$BET_ID" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$BET_ID\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-demo\",\"gameId\":\"game-demo\",\"kind\":\"BET\",\"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}"
+```
+
+A chamada retorna `PROCESSED` e deixa o saldo em `75.00`. Repetir a mesma
+chamada `curl`, sem recriar `BET_ID`, retorna
+`idempotentReplay: true`, sem criar outro débito.
+
+Consulte o saldo e o ledger:
+
+```bash
+curl -fsS "http://localhost:8081/wallets/$WALLET_ID" \
+  --oauth2-bearer "$INTERNAL_TOKEN"
+
+curl -fsS "http://localhost:8081/wallets/$WALLET_ID/ledger?limit=50" \
+  --oauth2-bearer "$INTERNAL_TOKEN"
+```
+
+Valores monetários usam strings com duas casas decimais, como
+`{"amount":"25.00","currency":"BRL"}`. Para testar outro fluxo, altere
+`externalTransactionId` e `Idempotency-Key` juntos.
+
+## Rotas principais
+
+| Método e rota | Acesso | Uso |
+| --- | --- | --- |
+| `POST /wallets` | `internal` | Abre uma carteira |
+| `GET /wallets/:walletId` | `internal` | Consulta saldo e versão |
+| `GET /wallets/:walletId/ledger?cursor=...&limit=50` | `internal` | Lista o ledger |
+| `POST /wallets/:walletId/reconciliation` | `internal` | Confere saldo e ledger |
+| `POST /wagering/transactions` | `provider` | Processa uma operação |
+| `GET /wagering/transactions/:transactionId` | `provider` autorizado | Consulta por ID interno |
+| `GET /providers/:providerId/wagering/transactions/:externalTransactionId` | `provider` autorizado | Consulta por ID externo |
+| `GET /health/live` | Público | Verifica se o processo está vivo |
+| `GET /health/ready` | Público | Verifica PostgreSQL e SQS |
+
+As rotas de negócio exigem um token Bearer. O header `Idempotency-Key` é
+obrigatório em `POST /wagering/transactions`. Provedores só acessam os
+próprios dados; operações de carteira exigem o cliente interno.
+
+## Garantias principais
+
+O serviço foi implementado para manter o resultado financeiro correto diante
+de mensagens repetidas, concorrência entre instâncias, falhas entre commit e
+publicação, referências fora de ordem, restart e indisponibilidade temporária.
+
+As garantias dependem do PostgreSQL, da inbox/outbox e dos workers, não apenas
+da deduplicação do SQS. [ARCHITECTURE.md](ARCHITECTURE.md) descreve as decisões
+de implementação e os estados das transações. O catálogo de `failureCode`, os
+eventos e as regras de consumo estão em [docs/CONTRACTS.md](docs/CONTRACTS.md).
+
+## Testes
+
+Os testes unitários não precisam do Compose. Os testes com a tag `integration`
+criam PostgreSQL, Keycloak e MiniStack com Testcontainers, então o daemon
+Docker precisa estar disponível.
+
+```bash
+make test
+make test-race
+make vet
+make test-integration
+```
+
+Os testes cobrem parsing e operações de `Money`, invariantes da carteira,
+transições de estado, idempotência, migrations, constraints, ledger
+append-only, inbox, reentrega, retries, DLQ, outbox concorrente,
+autenticação, autorização, isolamento entre provedores, concorrência entre
+processos, restart, referências pendentes e ciclo de vida do Fx.
+
+Para executar cenários específicos:
+
+```bash
+# Concorrência entre três processos.
+go test -race -tags=integration -count=1 ./test/integration \
+  -run '^TestMultiInstanceConcurrency$' -v
+
+# Recuperação da outbox e disputa entre publishers.
+go test -race -tags=integration -count=1 ./test/integration \
+  -run 'Test(RecoveryAfterCommitBeforeDelete|RecoveryAfterCommitBeforePublish|RecoveryAfterPublishBeforeMark|TwoPublishersWithRealQueue)$' -v
+
+# Restart, indisponibilidade temporária e ciclo de vida do Fx.
+go test -race -tags=integration -count=1 ./test/integration \
+  -run 'Test(RestartPreservesIdempotencyAndPending|TemporaryPostgresAndSQSOutage|FxModuleStartsAndStopsRealComponents)$' -v
+```

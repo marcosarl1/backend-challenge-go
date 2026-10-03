@@ -1,0 +1,27 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyProducerReads",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": "arn:aws:iam::111111111111:user/wager-producer"
+      },
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:ChangeMessageVisibility"
+      ],
+      "Resource": "arn:aws:sqs:us-east-1:111111111111:wager-transactions.fifo"
+    },
+    {
+      "Sid": "DenyServiceWritesToInput",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": "arn:aws:iam::111111111111:user/wager-service"
+      },
+      "Action": "sqs:SendMessage",
+      "Resource": "arn:aws:sqs:us-east-1:111111111111:wager-transactions.fifo"
+    }
+  ]
+}

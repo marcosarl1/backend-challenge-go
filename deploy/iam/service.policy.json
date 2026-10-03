@@ -1,0 +1,40 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CheckSQSReadiness",
+      "Effect": "Allow",
+      "Action": "sqs:ListQueues",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ResolveServiceQueues",
+      "Effect": "Allow",
+      "Action": "sqs:GetQueueUrl",
+      "Resource": [
+        "arn:aws:sqs:us-east-1:111111111111:wager-transactions.fifo",
+        "arn:aws:sqs:us-east-1:111111111111:wager-transactions-dlq.fifo",
+        "arn:aws:sqs:us-east-1:111111111111:wager-events.fifo"
+      ]
+    },
+    {
+      "Sid": "ConsumeWagerRequests",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:ChangeMessageVisibility"
+      ],
+      "Resource": "arn:aws:sqs:us-east-1:111111111111:wager-transactions.fifo"
+    },
+    {
+      "Sid": "SendPoisonMessagesAndEvents",
+      "Effect": "Allow",
+      "Action": "sqs:SendMessage",
+      "Resource": [
+        "arn:aws:sqs:us-east-1:111111111111:wager-transactions-dlq.fifo",
+        "arn:aws:sqs:us-east-1:111111111111:wager-events.fifo"
+      ]
+    }
+  ]
+}

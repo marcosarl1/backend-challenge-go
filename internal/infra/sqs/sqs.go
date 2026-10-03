@@ -9,7 +9,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	sqssdk "github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"go.opentelemetry.io/otel/codes"
@@ -34,14 +33,13 @@ type Client struct {
 }
 
 // NewClient monta o cliente para o endpoint (ex.: http://localhost:4566).
-// Credencial é de mentira no emulador; na AWS real vêm do ambiente.
+// As credenciais vêm da cadeia padrão do SDK, inclusive variáveis de ambiente.
 func NewClient(ctx context.Context, endpoint, region string) (*Client, error) {
 	if endpoint == "" || region == "" {
 		return nil, fmt.Errorf("sqs: endpoint ou região vazios")
 	}
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
 		config.WithBaseEndpoint(endpoint),
 	)
 	if err != nil {

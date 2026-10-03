@@ -1,19 +1,27 @@
-.PHONY: up down migrate-up migrate-down test test-race test-integration vet fmt lint build
+.PHONY: up down run check-sqs-auth migrate-up migrate-down test test-race test-integration vet fmt lint build
 
-DATABASE_URL ?= postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable
-MIGRATE_IMAGE ?= docker.io/migrate/migrate:v4.20.1
+MIGRATE_DATABASE_URL ?= postgres://wagering:wagering@db:5432/wagering?sslmode=disable
 
 up:
-	docker compose up --build
+	mkdir -p .local
+	docker compose up -d db sqs keycloak
+	HOST_UID=$$(id -u) HOST_GID=$$(id -g) docker compose run --rm sqs-init
+
+run:
+	@test -f .local/sqs-service.env || { echo "execute make up antes de make run"; exit 1; }
+	@set -a; . ./.local/sqs-service.env; set +a; go run ./cmd/wagering
+
+check-sqs-auth:
+	docker compose run --rm sqs-auth-check
 
 down:
 	docker compose down
 
 migrate-up:
-	docker run --rm --network host -v ./migrations:/migrations $(MIGRATE_IMAGE) -path /migrations -database "$(DATABASE_URL)" up
+	docker compose run --rm migrate -path /migrations -database "$(MIGRATE_DATABASE_URL)" up
 
 migrate-down:
-	docker run --rm --network host -v ./migrations:/migrations $(MIGRATE_IMAGE) -path /migrations -database "$(DATABASE_URL)" down 1
+	docker compose run --rm migrate -path /migrations -database "$(MIGRATE_DATABASE_URL)" down 1
 
 test:
 	go test ./...

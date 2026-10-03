@@ -21,9 +21,12 @@ services:
   sqs:
     image: ministackorg/ministack:1.5.20
     ports:
-      - "4566:4566"
+      - "127.0.0.1:4566:4566"
     environment:
       AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AUTH: "true"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import json,urllib.request; d=json.load(urllib.request.urlopen('http://localhost:4566/_localstack/health', timeout=3)); assert d['services'].get('sqs') == 'available'\""]
       interval: 5s
@@ -38,13 +41,42 @@ services:
         condition: service_healthy
     volumes:
       - ./deploy/sqs/init-queues.sh:/init-queues.sh:ro
+      - ./deploy/iam:/policies:ro
+      - ./.local:/credentials
     environment:
       AWS_ENDPOINT_URL: http://sqs:4566
       AWS_REGION: us-east-1
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       AWS_EC2_METADATA_DISABLED: "true"
+      HOST_UID: ${HOST_UID:-1000}
+      HOST_GID: ${HOST_GID:-1000}
     entrypoint: ["sh", "/init-queues.sh"]
+
+  sqs-auth-check:
+    image: docker.io/amazon/aws-cli:2.37.8
+    profiles: ["tools"]
+    depends_on:
+      sqs:
+        condition: service_healthy
+    volumes:
+      - ./deploy/sqs/check-auth.sh:/check-auth.sh:ro
+      - ./.local:/credentials:ro
+    environment:
+      AWS_ENDPOINT_URL: http://sqs:4566
+      AWS_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: "true"
+    entrypoint: ["sh", "/check-auth.sh"]
+
+  migrate:
+    image: docker.io/migrate/migrate:v4.20.1
+    profiles: ["tools"]
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    entrypoint: ["migrate"]
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.7.5
