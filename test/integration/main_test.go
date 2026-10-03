@@ -202,6 +202,10 @@ func createQueues(ctx context.Context, endpoint string) error {
 	if err != nil {
 		return err
 	}
+	providerBURL, err := create(infrasqs.ProviderBQueue)
+	if err != nil {
+		return err
+	}
 	attrs, err := client.GetQueueAttributes(ctx, &awssqs.GetQueueAttributesInput{
 		QueueUrl: aws.String(dlqURL), AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn}})
 	if err != nil {
@@ -211,9 +215,13 @@ func createQueues(ctx context.Context, endpoint string) error {
 	if err != nil {
 		return err
 	}
-	_, err = client.SetQueueAttributes(ctx, &awssqs.SetQueueAttributesInput{QueueUrl: aws.String(mainURL),
-		Attributes: map[string]string{"VisibilityTimeout": "30", "RedrivePolicy": string(policy)}})
-	return err
+	for _, url := range []string{mainURL, providerBURL} {
+		if _, err := client.SetQueueAttributes(ctx, &awssqs.SetQueueAttributesInput{QueueUrl: aws.String(url),
+			Attributes: map[string]string{"VisibilityTimeout": "30", "RedrivePolicy": string(policy)}}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // TestBinaryProcessStartsWithRealDependencies sobe o executável e verifica o readiness real.
@@ -250,7 +258,7 @@ func startAppProcessControlled(t *testing.T, extraEnv ...string) (string, func()
 	}
 	cmd := exec.Command(integrationBinary)
 	cmd.Env = append(append(os.Environ(), "HTTP_ADDR="+addr, "METRICS_ADDR=127.0.0.1:0",
-		"DATABASE_URL="+os.Getenv("TEST_DATABASE_URL"), "SQS_ENDPOINT="+os.Getenv("TEST_SQS_ENDPOINT"),
+		"DATABASE_URL="+appURL(t, os.Getenv("TEST_DATABASE_URL")), "SQS_ENDPOINT="+os.Getenv("TEST_SQS_ENDPOINT"),
 		"OIDC_ISSUER="+os.Getenv("TEST_KEYCLOAK_URL")+"/realms/wagering",
 		"OIDC_JWKS_URL="+os.Getenv("TEST_KEYCLOAK_URL")+"/realms/wagering/protocol/openid-connect/certs",
 		"OUTBOX_OWNER=integration-"+uuid.NewString()), extraEnv...)

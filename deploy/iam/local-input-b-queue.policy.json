@@ -5,23 +5,23 @@
       "Sid": "DenyProducerReads",
       "Effect": "Deny",
       "Principal": {
-        "AWS": "arn:aws:iam::111111111111:user/wager-producer"
+        "AWS": "arn:aws:iam::111111111111:user/wager-producer-b"
       },
       "Action": [
         "sqs:ReceiveMessage",
         "sqs:DeleteMessage",
         "sqs:ChangeMessageVisibility"
       ],
-      "Resource": "arn:aws:sqs:us-east-1:111111111111:wager-transactions.fifo"
+      "Resource": "arn:aws:sqs:us-east-1:111111111111:wager-transactions-provider-b.fifo"
     },
     {
       "Sid": "DenyOtherProducerWrites",
       "Effect": "Deny",
       "Principal": {
-        "AWS": "arn:aws:iam::111111111111:user/wager-producer-b"
+        "AWS": "arn:aws:iam::111111111111:user/wager-producer"
       },
       "Action": "sqs:SendMessage",
-      "Resource": "arn:aws:sqs:us-east-1:111111111111:wager-transactions.fifo"
+      "Resource": "arn:aws:sqs:us-east-1:111111111111:wager-transactions-provider-b.fifo"
     },
     {
       "Sid": "DenyServiceWritesToInput",
@@ -30,7 +30,7 @@
         "AWS": "arn:aws:iam::111111111111:user/wager-service"
       },
       "Action": "sqs:SendMessage",
-      "Resource": "arn:aws:sqs:us-east-1:111111111111:wager-transactions.fifo"
+      "Resource": "arn:aws:sqs:us-east-1:111111111111:wager-transactions-provider-b.fifo"
     }
   ]
 }

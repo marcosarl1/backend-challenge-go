@@ -21,7 +21,6 @@ func TestAsTypeAndMapInsertError(t *testing.T) {
 	}{
 		{"id externo", "wt_provider_external_uk", ErrExternalIDReused},
 		{"carteira ausente", "wager_transactions_wallet_id_fkey", ErrNotFound},
-		{"outra restrição", "wt_provider_idemkey_uk", ErrExternalIDReused},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			wrapped := fmt.Errorf("inserindo: %w", &ConflictError{Constraint: tt.constraint, Err: cause})
@@ -33,6 +32,10 @@ func TestAsTypeAndMapInsertError(t *testing.T) {
 				t.Fatalf("classificação = %v, esperado %v", got, tt.want)
 			}
 		})
+	}
+	unknown := fmt.Errorf("inserindo: %w", &ConflictError{Constraint: "outra_restricao", Err: cause})
+	if got := mapInsertError(unknown); got != unknown {
+		t.Fatalf("restrição inesperada foi mascarada: %v", got)
 	}
 	if conflict, ok := AsType[*ConflictError](cause); ok || conflict != nil {
 		t.Fatalf("erro comum classificado: %+v", conflict)

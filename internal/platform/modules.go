@@ -115,6 +115,7 @@ func newSQSClient(cfg config.Config, tracing *observability.Tracing) (*sqsinfra.
 
 type queueURLs struct {
 	transactions string
+	providerB    string
 	dlq          string
 	events       string
 }
@@ -129,6 +130,10 @@ func newQueueURLs(client *sqsinfra.Client, cfg config.Config) (queueURLs, error)
 	if err != nil {
 		return queueURLs{}, err
 	}
+	providerB, err := client.ResolveQueue(ctx, sqsinfra.ProviderBQueue)
+	if err != nil {
+		return queueURLs{}, err
+	}
 	dlq, err := client.ResolveQueue(ctx, sqsinfra.DLQQueue)
 	if err != nil {
 		return queueURLs{}, err
@@ -137,7 +142,7 @@ func newQueueURLs(client *sqsinfra.Client, cfg config.Config) (queueURLs, error)
 	if err != nil {
 		return queueURLs{}, err
 	}
-	return queueURLs{transactions: transactions, dlq: dlq, events: events}, nil
+	return queueURLs{transactions: transactions, providerB: providerB, dlq: dlq, events: events}, nil
 }
 
 func newSQSHealthChecker(client *sqsinfra.Client) httpapi.HealthChecker {
@@ -175,8 +180,17 @@ func newHTTPServer(handler http.Handler, cfg config.Config) *http.Server {
 	return httpapi.NewHTTPServer(handler, cfg.HTTPAddr)
 }
 
-func newConsumer(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, logger *slog.Logger, metrics *observability.Metrics, tracing *observability.Tracing) *sqsinfra.Consumer {
-	return sqsinfra.NewConsumerWithTracing(client, urls.transactions, urls.dlq, cfg.ConsumerName, uow, clock, ids, cfg.ConsumerWorkers, int(cfg.ConsumerPoll.Seconds()), logger, metrics, tracing)
+type providerConsumers struct {
+	providerA *sqsinfra.Consumer
+	providerB *sqsinfra.Consumer
+}
+
+// newConsumer cria um consumidor por fila, mantendo o nome da inbox isolado por provedor.
+func newConsumer(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, logger *slog.Logger, metrics *observability.Metrics, tracing *observability.Tracing) providerConsumers {
+	newProvider := func(queueURL, providerID string) *sqsinfra.Consumer {
+		return sqsinfra.NewProviderConsumerWithTracing(client, queueURL, urls.dlq, cfg.ConsumerName+":"+providerID, providerID, uow, clock, ids, cfg.ConsumerWorkers, int(cfg.ConsumerPoll.Seconds()), logger, metrics, tracing)
+	}
+	return providerConsumers{providerA: newProvider(urls.transactions, "provider-a"), providerB: newProvider(urls.providerB, "provider-b")}
 }
 
 func newOutboxPublisher(client *sqsinfra.Client, urls queueURLs, cfg config.Config, uow application.UnitOfWork, clock application.Clock, logger *slog.Logger, metrics *observability.Metrics, tracing *observability.Tracing) *outbox.Publisher {
@@ -194,7 +208,7 @@ type runtimeParams struct {
 	Shutdown  fx.Shutdowner
 	Server    *http.Server
 	Checks    []httpapi.HealthChecker `group:"health"`
-	Consumer  *sqsinfra.Consumer
+	Consumers providerConsumers
 	Publisher *outbox.Publisher
 	Retry     *pending.Worker
 	Logger    *slog.Logger
@@ -204,12 +218,13 @@ type runtimeParams struct {
 
 // registerComponents conecta os serviços gerenciados ao lifecycle do Fx.
 func registerComponents(p runtimeParams) error {
-	server, consumer, publisher, retry := p.Server, p.Consumer, p.Publisher, p.Retry
-	if server == nil || server.Handler == nil || consumer == nil || publisher == nil || retry == nil {
+	server, consumers, publisher, retry := p.Server, p.Consumers, p.Publisher, p.Retry
+	if server == nil || server.Handler == nil || consumers.providerA == nil || consumers.providerB == nil || publisher == nil || retry == nil {
 		return fmt.Errorf("registrando componentes: dependência ausente")
 	}
 	managed, err := registerLifecycle(p.Lifecycle, p.Shutdown, server, p.Checks, p.Config,
-		componentRunner{name: "consumidor SQS", run: consumer.Run},
+		componentRunner{name: "consumidor SQS provider-a", run: consumers.providerA.Run},
+		componentRunner{name: "consumidor SQS provider-b", run: consumers.providerB.Run},
 		componentRunner{name: "publicador da outbox", run: func(ctx context.Context) error {
 			return publisher.Run(ctx, p.Config.OutboxInterval)
 		}},

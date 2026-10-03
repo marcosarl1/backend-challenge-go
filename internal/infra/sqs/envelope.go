@@ -2,9 +2,11 @@ package sqs
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,14 +40,14 @@ type envelopeIn struct {
 	} `json:"data"`
 }
 
-// parsedCommand é o comando pronto com o hash do conteúdo.
+// parsedCommand é o comando pronto para processar a mensagem.
 type parsedCommand struct {
 	MessageID string
 	Command   application.ProcessCommand
-	Hash      []byte
 }
 
 const expectedEnvelopeType = "WagerTransactionRequested"
+const inboxHashVersion byte = 1
 
 // parseEnvelope valida e converte. Erro aqui é permanente: a mensagem nunca vai prestar, então vai para a DLQ com o motivo.
 func parseEnvelope(raw []byte) (parsedCommand, []byte, error) {
@@ -55,6 +57,9 @@ func parseEnvelope(raw []byte) (parsedCommand, []byte, error) {
 	var in envelopeIn
 	if err := dec.Decode(&in); err != nil {
 		return empty, nil, fmt.Errorf("%w: %v", application.ErrInvalidInput, err)
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		return empty, nil, fmt.Errorf("%w: conteúdo após o envelope", application.ErrInvalidInput)
 	}
 	if in.Type != expectedEnvelopeType {
 		return empty, nil, fmt.Errorf("%w: tipo %q", application.ErrInvalidInput, in.Type)
@@ -85,16 +90,17 @@ func parseEnvelope(raw []byte) (parsedCommand, []byte, error) {
 			return empty, nil, fmt.Errorf("%w: %s vazio", application.ErrInvalidInput, field)
 		}
 	}
-	hash, err := idempotency.Hash(idempotency.Operation{
+	if _, err := idempotency.Hash(idempotency.Operation{
 		ProviderID: in.Data.ProviderID, ExternalID: in.Data.ExternalTxID,
 		PlayerID: playerID.String(), WalletID: walletID.String(),
 		RoundID: in.Data.RoundID, GameID: in.Data.GameID, Kind: in.Data.Kind,
 		Amount: in.Data.Money.Amount, Currency: in.Data.Money.Currency,
 		ReferenceExt: in.Data.ReferenceExtID,
-	})
-	if err != nil {
+	}); err != nil {
 		return empty, nil, fmt.Errorf("%w: %v", application.ErrInvalidInput, err)
 	}
+	messageHash := sha256.Sum256(raw)
+	inboxHash := append([]byte{inboxHashVersion}, messageHash[:]...)
 	return parsedCommand{
 		MessageID: in.MessageID,
 		Command: application.ProcessCommand{
@@ -104,8 +110,7 @@ func parseEnvelope(raw []byte) (parsedCommand, []byte, error) {
 			Amount: amount, ReferenceExternalID: in.Data.ReferenceExtID,
 			CorrelationID: in.MessageID,
 		},
-		Hash: hash[:],
-	}, hash[:], nil
+	}, inboxHash, nil
 }
 
 // isPermanent diz o que nunca vai prestar (vai para a DLQ). O resto é transitório: solta e tenta de novo (o redrive segura o limite).

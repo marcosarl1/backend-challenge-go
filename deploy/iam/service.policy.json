@@ -13,6 +13,7 @@
       "Action": "sqs:GetQueueUrl",
       "Resource": [
         "arn:aws:sqs:us-east-1:111111111111:wager-transactions.fifo",
+        "arn:aws:sqs:us-east-1:111111111111:wager-transactions-provider-b.fifo",
         "arn:aws:sqs:us-east-1:111111111111:wager-transactions-dlq.fifo",
         "arn:aws:sqs:us-east-1:111111111111:wager-events.fifo"
       ]
@@ -25,7 +26,10 @@
         "sqs:DeleteMessage",
         "sqs:ChangeMessageVisibility"
       ],
-      "Resource": "arn:aws:sqs:us-east-1:111111111111:wager-transactions.fifo"
+      "Resource": [
+        "arn:aws:sqs:us-east-1:111111111111:wager-transactions.fifo",
+        "arn:aws:sqs:us-east-1:111111111111:wager-transactions-provider-b.fifo"
+      ]
     },
     {
       "Sid": "SendPoisonMessagesAndEvents",

@@ -44,7 +44,7 @@ func Load() Config {
 		HTTPAddr:        env("HTTP_ADDR", ":8081"),
 		MetricsAddr:     env("METRICS_ADDR", "127.0.0.1:9090"),
 		OTLPEndpoint:    env("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
-		DatabaseURL:     env("DATABASE_URL", "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable"),
+		DatabaseURL:     env("DATABASE_URL", "postgres://app:app@localhost:5432/wagering?sslmode=disable"),
 		SQSEndpoint:     env("SQS_ENDPOINT", "http://localhost:4566"),
 		SQSRegion:       env("SQS_REGION", "us-east-1"),
 		OIDCIssuer:      env("OIDC_ISSUER", "http://localhost:8080/realms/wagering"),

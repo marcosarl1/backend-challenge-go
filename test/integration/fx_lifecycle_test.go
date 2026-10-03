@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
-	"github.com/marcosarl1/backend-challenge-go/internal/infra/sqs"
 	"github.com/marcosarl1/backend-challenge-go/internal/platform"
 	"github.com/marcosarl1/backend-challenge-go/internal/workers/outbox"
 	"github.com/marcosarl1/backend-challenge-go/internal/workers/pending"
@@ -41,7 +40,7 @@ func TestFxModuleStartsAndStopsRealComponents(t *testing.T) {
 	}
 	t.Setenv("HTTP_ADDR", httpAddr)
 	t.Setenv("METRICS_ADDR", metricsAddr)
-	t.Setenv("DATABASE_URL", ownerURL(t))
+	t.Setenv("DATABASE_URL", appURL(t, ownerURL(t)))
 	t.Setenv("SQS_ENDPOINT", sqsURL(t))
 	t.Setenv("SQS_REGION", "us-east-1")
 	t.Setenv("OIDC_ISSUER", keycloakURL(t)+"/realms/wagering")
@@ -53,14 +52,13 @@ func TestFxModuleStartsAndStopsRealComponents(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 
 	var pool *pgxpool.Pool
-	var consumer *sqs.Consumer
 	var publisher *outbox.Publisher
 	var retry *pending.Worker
-	app := fx.New(platform.Module, fx.NopLogger, fx.Populate(&pool, &consumer, &publisher, &retry))
+	app := fx.New(platform.Module, fx.NopLogger, fx.Populate(&pool, &publisher, &retry))
 	if err := app.Err(); err != nil {
 		t.Fatalf("composição Fx: %v", err)
 	}
-	if pool == nil || consumer == nil || publisher == nil || retry == nil {
+	if pool == nil || publisher == nil || retry == nil {
 		t.Fatal("grafo Fx sem algum componente gerenciado")
 	}
 	stopped := false

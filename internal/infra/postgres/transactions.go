@@ -16,7 +16,7 @@ import (
 // idempotência e a varredura de pendências do worker.
 type WagerStore struct{}
 
-// Insert tenta gravar a transação pendente. A correlação vem de fora (é de transporte, não do domínio). Se a chave de idempotência já existe, não grava nada e devolve (false, nil): quem chama resolve o conflito ou o replay lendo a linha existente.
+// Insert tenta gravar a transação pendente. A correlação vem de fora (é de transporte, não do domínio). Conflitos de unicidade não gravam nada: quem chama consulta a chave e o ID externo para distinguir replay de conflito.
 func (WagerStore) Insert(ctx context.Context, db DBTX, tx *wager.WagerTransaction, correlationID string) (bool, error) {
 	s := tx.Snapshot()
 	var origin, nullProvider, nullExternal, nullKey, nullHash, nullRound, nullGame any
@@ -46,7 +46,7 @@ func (WagerStore) Insert(ctx context.Context, db DBTX, tx *wager.WagerTransactio
 		 attempts, next_attempt_at, expires_at, correlation_id, created_at, updated_at, resolved_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
 		 $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
-		ON CONFLICT (provider_id, idempotency_key) DO NOTHING`,
+		ON CONFLICT DO NOTHING`,
 		toPGUUID(s.ID), origin, string(s.Kind), string(s.Status),
 		toPGUUID(s.WalletID), toPGUUID(s.PlayerID), string(s.Amount.Currency()), s.Amount.Minor(),
 		nullProvider, nullExternal, nullKey, nullHash, nullRound, nullGame,

@@ -1,6 +1,7 @@
 package sqs
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -26,6 +27,7 @@ type Consumer struct {
 	queueURL     string
 	dlqURL       string
 	consumerName string
+	providerID   string
 	uow          application.UnitOfWork
 	clock        application.Clock
 	ids          application.IDGenerator
@@ -65,6 +67,13 @@ func NewConsumerWithTracing(queues QueueOps, queueURL, dlqURL, consumerName stri
 	return &Consumer{queues: queues, queueURL: queueURL, dlqURL: dlqURL,
 		consumerName: consumerName, uow: uow, clock: clock, ids: ids,
 		workers: workers, pollSeconds: pollSeconds, logger: logger, metrics: metrics, tracing: tracing}
+}
+
+// NewProviderConsumerWithTracing vincula o consumidor ao provedor autorizado pela fila de entrada.
+func NewProviderConsumerWithTracing(queues QueueOps, queueURL, dlqURL, consumerName, providerID string, uow application.UnitOfWork, clock application.Clock, ids application.IDGenerator, workers, pollSeconds int, logger *slog.Logger, metrics *observability.Metrics, tracing *observability.Tracing) *Consumer {
+	consumer := NewConsumerWithTracing(queues, queueURL, dlqURL, consumerName, uow, clock, ids, workers, pollSeconds, logger, metrics, tracing)
+	consumer.providerID = providerID
+	return consumer
 }
 
 // Run puxa e aplica até o contexto acabar. Para de buscar ao cancelar e termina o lote em voo antes de voltar.
@@ -114,6 +123,10 @@ func (c *Consumer) handle(ctx context.Context, msg Received) {
 		c.toDLQ(ctx, msg, "envelope inválido: "+err.Error())
 		return
 	}
+	if c.providerID != "" && cmd.Command.ProviderID != c.providerID {
+		c.toDLQ(ctx, msg, "providerId divergente da fila autorizada")
+		return
+	}
 	ctx = observability.WithFields(ctx,
 		slog.String("messageId", cmd.MessageID),
 		slog.String("correlationId", cmd.Command.CorrelationID),
@@ -136,7 +149,7 @@ func (c *Consumer) handle(ctx context.Context, msg Received) {
 			if err != nil {
 				return err
 			}
-			if !equalHash(stored, hash) {
+			if !bytes.Equal(stored, hash) {
 				poison = "veneno: mesmo messageId com outro conteúdo: " + cmd.MessageID
 			}
 			return nil
@@ -237,17 +250,4 @@ func backoffDelay(receiveCount int) int {
 		return 60
 	}
 	return delay
-}
-
-func equalHash(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	match := true
-	for i := range a {
-		if a[i] != b[i] {
-			match = false
-		}
-	}
-	return match
 }

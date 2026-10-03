@@ -38,20 +38,25 @@ func TestBackoffDelay(t *testing.T) {
 }
 
 type releaseQueue struct {
-	ctx   context.Context
-	err   error
-	delay int
+	ctx     context.Context
+	err     error
+	delay   int
+	reason  string
+	deleted bool
 }
 
 func (q *releaseQueue) Receive(context.Context, string, int, int) ([]Received, error) {
 	return nil, nil
 }
-func (q *releaseQueue) Delete(context.Context, string, string) error { return nil }
+func (q *releaseQueue) Delete(context.Context, string, string) error { q.deleted = true; return nil }
 func (q *releaseQueue) Release(ctx context.Context, _, _ string, delay int) error {
 	q.ctx, q.err, q.delay = ctx, ctx.Err(), delay
 	return nil
 }
-func (q *releaseQueue) SendDLQ(context.Context, string, string, string, string) error { return nil }
+func (q *releaseQueue) SendDLQ(_ context.Context, _, _, reason, _ string) error {
+	q.reason = reason
+	return nil
+}
 
 func TestReleaseUsesIndependentContextAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -74,7 +79,7 @@ func TestParseEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("erro inesperado: %v", err)
 	}
-	if cmd.MessageID != "m-1" || cmd.Command.CorrelationID != "m-1" || len(hash) != 32 {
+	if cmd.MessageID != "m-1" || cmd.Command.CorrelationID != "m-1" || len(hash) != 33 || hash[0] != inboxHashVersion {
 		t.Fatalf("parse = %+v", cmd)
 	}
 	for name, body := range map[string]string{
@@ -83,12 +88,44 @@ func TestParseEnvelope(t *testing.T) {
 		"sem messageId": `{"type":"WagerTransactionRequested","occurredAt":"2026-09-08T12:00:00Z","data":{}}`,
 		"data ruim":     `{"messageId":"m","type":"WagerTransactionRequested","occurredAt":"2026-09-08T12:00:00Z","data":{"providerId":"a"}}`,
 		"campo a mais":  `{"messageId":"m","type":"WagerTransactionRequested","occurredAt":"2026-09-08T12:00:00Z","data":{},"extra":1}`,
+		"segundo JSON":  validEnvelope + ` {}`,
 		"dinheiro ruim": `{"messageId":"m","type":"WagerTransactionRequested","occurredAt":"2026-09-08T12:00:00Z","data":{"providerId":"a","externalTransactionId":"t","idempotencyKey":"k","playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","walletId":"0192f291-27dd-7d3f-8071-5f8685deef37","roundId":"r","gameId":"g","kind":"BET","money":{"amount":"25.0","currency":"BRL"}}}`,
 		"uuid ruim":     `{"messageId":"m","type":"WagerTransactionRequested","occurredAt":"2026-09-08T12:00:00Z","data":{"providerId":"a","externalTransactionId":"t","idempotencyKey":"k","playerId":"x","walletId":"y","roundId":"r","gameId":"g","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}}`,
 	} {
 		if _, _, err := parseEnvelope([]byte(body)); !errors.Is(err, application.ErrInvalidInput) {
 			t.Fatalf("%s erro = %v", name, err)
 		}
+	}
+}
+
+func TestInboxHashIncludesTransportFields(t *testing.T) {
+	_, hash, err := parseEnvelope([]byte(validEnvelope))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := strings.Replace(validEnvelope, `"idempotencyKey":"k-1"`, `"idempotencyKey":"k-2"`, 1)
+	_, changedHash, err := parseEnvelope([]byte(changed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(hash, changedHash) {
+		t.Fatal("mesmo messageId com outra chave foi aceito")
+	}
+	_, repeatedHash, err := parseEnvelope([]byte(validEnvelope))
+	if err != nil || !bytes.Equal(hash, repeatedHash) {
+		t.Fatalf("reentrega idêntica: %v", err)
+	}
+	if bytes.Equal(hash[1:], repeatedHash) {
+		t.Fatal("hash antigo sem versão foi aceito")
+	}
+}
+
+func TestProviderQueueRejectsDifferentProvider(t *testing.T) {
+	queues := &releaseQueue{}
+	consumer := NewProviderConsumerWithTracing(queues, "queue", "dlq", "consumer:provider-a", "provider-a", nil, nil, nil, 1, 1, nil, nil, nil)
+	consumer.handle(context.Background(), Received{MessageID: "sqs-1", ReceiptHandle: "receipt", Body: strings.Replace(validEnvelope, "provider-a", "provider-b", 1)})
+	if !queues.deleted || queues.reason != "providerId divergente da fila autorizada" {
+		t.Fatalf("mensagem divergente: deleted=%v reason=%q", queues.deleted, queues.reason)
 	}
 }
 

@@ -76,11 +76,16 @@ outra instância a retoma depois de uma queda. O catálogo de códigos está em
 ## Inbox, SQS e outbox
 
 O consumidor usa o `messageId` do envelope como identidade durável e
-confere o hash nas reentregas. A inbox e o resultado financeiro entram na
+confere o SHA-256 versionado dos bytes do envelope nas reentregas. Esse hash
+inclui a chave de idempotência e os metadados, diferentemente do hash
+financeiro compartilhado por HTTP e SQS. Hashes antigos na inbox não são
+considerados equivalentes: uma reentrega correspondente vai à DLQ, sem
+reexecutar a operação. A inbox e o resultado financeiro entram na
 mesma transação SQL. Ele apaga a mensagem do SQS só depois do commit;
 rejeição de negócio confirmada e referência pendente persistida também
 permitem o delete. Erros transitórios mantêm a mensagem para nova tentativa;
-mensagens inválidas vão à DLQ. A fila FIFO agrupa mensagens por carteira e
+mensagens inválidas vão à DLQ. Cada provedor tem uma fila de entrada FIFO;
+ambas agrupam mensagens por carteira e
 usa `messageId` para deduplicação. O init local configura visibilidade de
 30 segundos e redrive após cinco recebimentos. Essas funções do SQS ajudam
 na entrega; as garantias financeiras dependem do PostgreSQL.
@@ -98,17 +103,28 @@ payloads.
 
 ## Identidade e autorização
 
-No ambiente local, Keycloak fornece tokens OAuth 2.0/OIDC pelo fluxo
-`client_credentials` para `provider-a`, `provider-b` e `wallet-internal`.
-A API valida assinatura RS256 via JWKS, emissor, audiência, validade e role.
+O Keycloak foi escolhido como IdP externo porque pode rodar no Compose sem
+que a aplicação cadastre senhas ou emita tokens. No ambiente local, fornece
+tokens OAuth 2.0/OIDC pelo fluxo `client_credentials` para `provider-a`,
+`provider-b` e `wallet-internal`. O fluxo atende à comunicação serviço-a-serviço
+do desafio. A API valida assinatura RS256 via JWKS, emissor, audiência,
+validade e role.
 O claim `provider_id` do token define o provedor autorizado: divergência no
 corpo ou caminho retorna `403`, e a consulta de transação alheia retorna
-`404`. Somente a role `internal` acessa carteiras e reconciliação. O
-consumidor SQS mantém as validações de domínio. O MiniStack local avalia
-policies IAM e de fila com `AUTH=true`; o init cria identidades distintas
-para o serviço e o produtor. A aplicação usa a cadeia de credenciais do SDK.
-O emulador identifica a access key, mas não verifica a assinatura SigV4.
-Os exemplos e o limite estão em [deploy/iam/README.md](deploy/iam/README.md).
+`404`. A role `provider` só processa e consulta transações do seu provedor;
+a role `internal` restringe operações de carteira e reconciliação ao serviço
+interno.
+
+Foi escolhido o isolamento por fila para o envio direto dos provedores ao
+SQS. `provider-a` envia a `wager-transactions.fifo`; `provider-b` envia a
+`wager-transactions-provider-b.fifo`. As policies IAM restringem cada
+identidade à própria fila, e o consumidor compara o `providerId` do envelope
+com o provedor vinculado à fila antes de executar o caso de uso. Divergências
+vão à DLQ sem transação financeira. O MiniStack local avalia policies IAM e
+de fila com `AUTH=true`; o init cria credenciais distintas para serviço e
+provedores. A aplicação usa a cadeia de credenciais do SDK. O emulador
+identifica a access key, mas não verifica a assinatura SigV4. Os exemplos e
+os requisitos de implantação estão em [deploy/iam/README.md](deploy/iam/README.md).
 
 ## Fx, desligamento e observabilidade
 
@@ -133,6 +149,8 @@ O Compose inicia PostgreSQL, MiniStack, Keycloak e a criação das filas. As
 migrations rodam por `make migrate-up`; a aplicação roda com `make run`, que
 carrega a credencial local do serviço. O Compose preserva o volume do banco ao parar e
 usa credenciais locais de teste. O README traz os comandos completos.
+O processo usa a role PostgreSQL `app`, com permissões limitadas; a role
+`wagering` é usada apenas para migrations.
 
 Testes unitários cobrem domínio e adaptadores. A suíte de integração usa
 Testcontainers com PostgreSQL, Keycloak e MiniStack reais, além de processos

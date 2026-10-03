@@ -19,9 +19,10 @@ import (
 
 // Filas do serviço.
 const (
-	MainQueue   = "wager-transactions.fifo"
-	DLQQueue    = "wager-transactions-dlq.fifo"
-	EventsQueue = "wager-events.fifo"
+	MainQueue      = "wager-transactions.fifo"
+	ProviderBQueue = "wager-transactions-provider-b.fifo"
+	DLQQueue       = "wager-transactions-dlq.fifo"
+	EventsQueue    = "wager-events.fifo"
 )
 
 // Client fala com o SQS (ou o MiniStack local).

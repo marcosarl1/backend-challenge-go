@@ -110,6 +110,46 @@ func TestConsumerProcessesBet(t *testing.T) {
 	}
 }
 
+// TestProviderQueueIsolation confirma que a fila vinculada a B não processa um envelope de A.
+func TestProviderQueueIsolation(t *testing.T) {
+	runner, queueURL, dlqURL, client := consumerDeps(t)
+	walletID, playerID := fundWallet(t, runner, "100.00")
+	validID := "provider-b-valid-" + uuid.NewString()
+	wrongID := "provider-b-wrong-" + uuid.NewString()
+	validExt := "provider-b-ext-" + uuid.NewString()
+	wrongExt := "provider-a-ext-" + uuid.NewString()
+	valid := strings.Replace(envelopeFor(t, validID, walletID.String(), playerID.String(), validExt,
+		"provider-b:"+validExt, "BET", "25.00", ""), "provider-a", "provider-b", 1)
+	wrong := envelopeFor(t, wrongID, walletID.String(), playerID.String(), wrongExt,
+		"provider-a:"+wrongExt, "BET", "25.00", "")
+	for _, message := range []struct{ body, id string }{{valid, validID}, {wrong, wrongID}} {
+		if _, err := client.Send(context.Background(), queueURL, message.body, walletID.String(), message.id); err != nil {
+			t.Fatalf("enviando: %v", err)
+		}
+	}
+	consumer := infrasqs.NewProviderConsumerWithTracing(client, queueURL, dlqURL,
+		"test-consumer:provider-b", "provider-b", runner, application.SystemClock{},
+		application.UUIDv7Generator{}, 2, 2, nil, nil, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := consumer.Run(ctx); err != nil {
+		t.Fatalf("consumidor: %v", err)
+	}
+	if balance := countBalance(t, walletID); balance != "75.00" {
+		t.Fatalf("saldo = %s", balance)
+	}
+	if n := countRows(t, `SELECT COUNT(*) FROM wager_transactions WHERE external_transaction_id = $1`, wrongExt); n != 0 {
+		t.Fatalf("transação de outro provedor persistida: %d", n)
+	}
+	if n := countRows(t, `SELECT COUNT(*) FROM inbox_messages WHERE message_id = $1`, wrongID); n != 0 {
+		t.Fatalf("mensagem de outro provedor na inbox: %d", n)
+	}
+	messages := drain(t, client, dlqURL)
+	if len(messages) != 1 || !strings.Contains(messages[0].Body, wrongID) {
+		t.Fatalf("DLQ = %+v", messages)
+	}
+}
+
 func TestConsumerInvalidGoesToDLQ(t *testing.T) {
 	runner, mainURL, dlqURL, client := consumerDeps(t)
 	ctx := context.Background()

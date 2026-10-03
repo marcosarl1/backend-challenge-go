@@ -4,7 +4,8 @@
 # atributos da fila principal são ajustados para o valor esperado.
 #
 # Filas:
-#   wager-transactions.fifo      (entrada, FIFO, com redirecionamento para a DLQ)
+#   wager-transactions.fifo      (entrada do provider-a)
+#   wager-transactions-provider-b.fifo (entrada do provider-b)
 #   wager-transactions-dlq.fifo  (fila de mensagens com falha repetida)
 #   wager-events.fifo            (destino dos eventos publicados pelo serviço)
 
@@ -18,6 +19,7 @@ export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
 export AWS_EC2_METADATA_DISABLED=true
 
 MAIN_QUEUE="wager-transactions.fifo"
+PROVIDER_B_QUEUE="wager-transactions-provider-b.fifo"
 DLQ_QUEUE="wager-transactions-dlq.fifo"
 EVENTS_QUEUE="wager-events.fifo"
 MAX_RECEIVE_COUNT=5
@@ -63,11 +65,13 @@ printf '{"FifoQueue":"true","ContentBasedDeduplication":"false","VisibilityTimeo
 	>"$TMPDIR_ROOT/main.json"
 
 MAIN_URL="$(ensure_queue "$MAIN_QUEUE" "$TMPDIR_ROOT/main.json")"
-aws --endpoint-url "$ENDPOINT" --region "$REGION" \
-	sqs set-queue-attributes --queue-url "$MAIN_URL" \
-	--attributes "file://$TMPDIR_ROOT/main.json" \
-	>/dev/null
-echo "attributes converged: $MAIN_QUEUE (VisibilityTimeout=30s, maxReceiveCount=$MAX_RECEIVE_COUNT)"
+PROVIDER_B_URL="$(ensure_queue "$PROVIDER_B_QUEUE" "$TMPDIR_ROOT/main.json")"
+for url in "$MAIN_URL" "$PROVIDER_B_URL"; do
+	aws --endpoint-url "$ENDPOINT" --region "$REGION" \
+		sqs set-queue-attributes --queue-url "$url" \
+		--attributes "file://$TMPDIR_ROOT/main.json" >/dev/null
+done
+echo "attributes converged: input queues (VisibilityTimeout=30s, maxReceiveCount=$MAX_RECEIVE_COUNT)"
 
 EVENTS_URL="$(ensure_queue "$EVENTS_QUEUE" "$TMPDIR_ROOT/fifo.json")"
 
@@ -122,19 +126,28 @@ ensure_credentials() {
 
 ensure_user wager-service service.policy.json
 ensure_user wager-producer producer.policy.json
+ensure_user wager-producer-b producer-b.policy.json
 ensure_credentials wager-service /credentials/sqs-service.env
 ensure_credentials wager-producer /credentials/sqs-producer.env
+ensure_credentials wager-producer-b /credentials/sqs-producer-b.env
 
-sed "s/111111111111/$ACCOUNT_ID/g; s/us-east-1/$REGION/g" \
-	/policies/local-input-queue.policy.json >"$TMPDIR_ROOT/queue-policy.json"
-POLICY_ESCAPED="$(sed 's/"/\\"/g' "$TMPDIR_ROOT/queue-policy.json" | tr -d '\n')"
-printf '{"Policy":"%s"}' "$POLICY_ESCAPED" >"$TMPDIR_ROOT/queue-policy-attrs.json"
-aws --endpoint-url "$ENDPOINT" --region "$REGION" \
-	sqs set-queue-attributes --queue-url "$MAIN_URL" \
-	--attributes "file://$TMPDIR_ROOT/queue-policy-attrs.json" >/dev/null
+apply_queue_policy() {
+	local url="$1" policy="$2" escaped=""
+	sed "s/111111111111/$ACCOUNT_ID/g; s/us-east-1/$REGION/g" \
+		"/policies/$policy" >"$TMPDIR_ROOT/queue-policy.json"
+	escaped="$(sed 's/"/\\"/g' "$TMPDIR_ROOT/queue-policy.json" | tr -d '\n')"
+	printf '{"Policy":"%s"}' "$escaped" >"$TMPDIR_ROOT/queue-policy-attrs.json"
+	aws --endpoint-url "$ENDPOINT" --region "$REGION" \
+		sqs set-queue-attributes --queue-url "$url" \
+		--attributes "file://$TMPDIR_ROOT/queue-policy-attrs.json" >/dev/null
+}
+
+apply_queue_policy "$MAIN_URL" local-input-queue.policy.json
+apply_queue_policy "$PROVIDER_B_URL" local-input-b-queue.policy.json
 
 echo "queues:"
 echo "  $MAIN_URL"
+echo "  $PROVIDER_B_URL"
 echo "  $DLQ_URL"
 echo "  $EVENTS_URL"
-echo "authorization: users wager-service and wager-producer; input queue policy applied"
+echo "authorization: service and separate provider-a/provider-b producers; input queue policies applied"

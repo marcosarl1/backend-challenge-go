@@ -62,17 +62,22 @@ make run
 O `make up` inicia PostgreSQL, MiniStack e Keycloak e cria as filas:
 
 - `wager-transactions.fifo`;
+- `wager-transactions-provider-b.fifo`;
 - `wager-transactions-dlq.fifo`;
 - `wager-events.fifo`.
 
-Ele também ativa a autorização IAM do MiniStack, cria identidades locais para
-o serviço e o produtor SQS e grava as credenciais geradas em `.local/`, fora do
-Git. `make run` carrega a credencial limitada do serviço. Após reiniciar o
-MiniStack, execute `make up` antes de iniciar a aplicação.
+Ele também ativa a autorização IAM do MiniStack e cria credenciais separadas
+para o serviço e para cada provedor em `.local/`, fora do Git. `provider-a`
+envia somente a `wager-transactions.fifo`, e `provider-b` somente a
+`wager-transactions-provider-b.fifo`. O consumidor confere o `providerId` do
+corpo contra a fila recebida antes da transação financeira. `make run`
+carrega apenas a credencial do serviço. Após reiniciar o MiniStack, execute
+`make up` antes de iniciar a aplicação.
 
-`make check-sqs-auth` envia e remove uma mensagem de prova na fila de entrada.
-Ele verifica que o produtor envia, o serviço consome e as ações inversas são
-negadas. Rode o comando antes de iniciar a aplicação, com a fila vazia.
+`make check-sqs-auth` envia e remove uma mensagem de prova em cada fila de entrada.
+Ele verifica o isolamento entre provedores, o consumo pelo serviço e as
+ações inversas negadas. Rode o comando antes de iniciar a aplicação, com as
+filas de entrada vazias.
 
 As migrations não rodam automaticamente quando a aplicação inicia. Execute
 `make migrate-up` antes de iniciar o binário.
@@ -110,6 +115,9 @@ As variáveis mais usadas são:
 - `METRICS_ADDR`: listener das métricas;
 - `OTEL_EXPORTER_OTLP_ENDPOINT`: endpoint OTLP; vazio desativa traces;
 - `SHUTDOWN_TIMEOUT`: prazo de encerramento do processo.
+
+O binário usa a role `app`, com permissões limitadas. A role `wagering` fica
+reservada às migrations; `make migrate-up` cria a role `app`.
 
 `HTTP_ADDR` e `METRICS_ADDR` precisam usar portas diferentes. No Bash, altere
 uma variável apenas para o processo iniciado:

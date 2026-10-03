@@ -27,6 +27,7 @@ type multiBetOutcome struct {
 		Status           string `json:"status"`
 		IdempotentReplay bool   `json:"idempotentReplay"`
 		FailureCode      string `json:"failureCode"`
+		Code             string `json:"code"`
 		Balance          struct {
 			Amount string `json:"amount"`
 		} `json:"balance"`

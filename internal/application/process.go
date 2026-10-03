@@ -100,9 +100,26 @@ func ExecuteInTx(ctx context.Context, r Repositories, clock Clock, ids IDGenerat
 		return nil, mapInsertError(err)
 	}
 	if !inserted {
-		return replay(ctx, r, cmd, hash[:])
+		return resolveInsertConflict(ctx, r, cmd, hash[:])
 	}
 	return processNew(ctx, r, ids, cmd, tx, now)
+}
+
+// resolveInsertConflict distingue um replay de uma chave nova para o mesmo ID externo.
+func resolveInsertConflict(ctx context.Context, r Repositories, cmd ProcessCommand, hash []byte) (*ProcessResult, error) {
+	existing, err := r.Wagers.FindByProviderKey(ctx, cmd.ProviderID, cmd.IdempotencyKey)
+	if err == nil {
+		return replayExisting(ctx, r, cmd, hash, existing)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	if _, err := r.Wagers.FindByProviderExternal(ctx, cmd.ProviderID, cmd.ExternalID); err == nil {
+		return nil, fmt.Errorf("%w: %s", ErrExternalIDReused, cmd.ExternalID)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	return nil, fmt.Errorf("conflito de unicidade sem chave ou ID externo correspondente")
 }
 
 func checkCommand(cmd ProcessCommand, now time.Time) error {
@@ -137,8 +154,8 @@ func checkCommand(cmd ProcessCommand, now time.Time) error {
 	return nil
 }
 
-// mapInsertError traduz o que o banco barrou na porta de entrada: id externo
-// com outra chave conflita; carteira inexistente não encontra.
+// mapInsertError traduz restrições que ainda podem falhar na inserção;
+// a ausência de carteira é tratada como recurso não encontrado.
 func mapInsertError(err error) error {
 	conflict, ok := AsType[*ConflictError](err)
 	if !ok {
@@ -150,18 +167,14 @@ func mapInsertError(err error) error {
 	case "wager_transactions_wallet_id_fkey":
 		return fmt.Errorf("%w: carteira", ErrNotFound)
 	default:
-		return fmt.Errorf("%w: %s", ErrExternalIDReused, conflict.Constraint)
+		return err
 	}
 }
 
-// replay devolve o gravado sem reexecutar: concluída traz o saldo original
+// replayExisting devolve o gravado sem reexecutar: concluída traz o saldo original
 // (mesmo que a carteira já tenha andado), rejeitada traz o código, pendente
 // traz o estado e o saldo atual.
-func replay(ctx context.Context, r Repositories, cmd ProcessCommand, hash []byte) (*ProcessResult, error) {
-	existing, err := r.Wagers.FindByProviderKey(ctx, cmd.ProviderID, cmd.IdempotencyKey)
-	if err != nil {
-		return nil, err
-	}
+func replayExisting(ctx context.Context, r Repositories, cmd ProcessCommand, hash []byte, existing *wager.WagerTransaction) (*ProcessResult, error) {
 	if !bytes.Equal(existing.PayloadHash(), hash) {
 		return nil, fmt.Errorf("%w: %s", ErrIdempotencyMismatch, cmd.IdempotencyKey)
 	}
