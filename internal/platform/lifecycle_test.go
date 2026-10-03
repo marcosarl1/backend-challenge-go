@@ -58,6 +58,49 @@ func TestLifecycleStartsAndStopsComponents(t *testing.T) {
 	}
 }
 
+// TestLifecycleStopsAllWorkers confirma que o Fx espera todos os loops após cancelar o contexto.
+func TestLifecycleStopsAllWorkers(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	started := make(chan string, 3)
+	stopped := make(chan string, 3)
+	runners := make([]componentRunner, 0, 3)
+	for _, name := range []string{"consumidor SQS", "publicador da outbox", "retomada de pendências"} {
+		runners = append(runners, componentRunner{name: name, run: func(ctx context.Context) error {
+			started <- name
+			<-ctx.Done()
+			stopped <- name
+			return nil
+		}})
+	}
+	cfg := validRuntimeConfig()
+	app := fxtest.New(t, fx.NopLogger, fx.Provide(func() config.Config { return cfg }),
+		fx.Provide(func() *http.Server {
+			return httpapi.NewHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}), cfg.HTTPAddr)
+		}),
+		fx.Invoke(func(lifecycle fx.Lifecycle, shutdown fx.Shutdowner, server *http.Server, cfg config.Config) error {
+			_, err := registerLifecycle(lifecycle, shutdown, server, nil, cfg, runners...)
+			return err
+		}))
+	app.RequireStart()
+	for range runners {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("worker não iniciou")
+		}
+	}
+	app.RequireStop()
+	for range runners {
+		select {
+		case <-stopped:
+		case <-time.After(time.Second):
+			t.Fatal("worker não terminou")
+		}
+	}
+}
+
 func TestLifecycleRejectsInvalidConfigBeforeStarting(t *testing.T) {
 	cfg := validRuntimeConfig()
 	cfg.ConsumerWorkers = 0
