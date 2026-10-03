@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -22,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
 	postgrescontainer "github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -233,7 +233,7 @@ func startAppProcess(t *testing.T) string {
 		"DATABASE_URL="+os.Getenv("TEST_DATABASE_URL"), "SQS_ENDPOINT="+os.Getenv("TEST_SQS_ENDPOINT"),
 		"OIDC_ISSUER="+os.Getenv("TEST_KEYCLOAK_URL")+"/realms/wagering",
 		"OIDC_JWKS_URL="+os.Getenv("TEST_KEYCLOAK_URL")+"/realms/wagering/protocol/openid-connect/certs",
-		"OUTBOX_OWNER=integration-"+strings.ReplaceAll(t.Name(), "/", "-"))
+		"OUTBOX_OWNER=integration-"+uuid.NewString())
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
