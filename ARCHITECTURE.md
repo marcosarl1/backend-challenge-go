@@ -157,8 +157,10 @@ Dentro da rede do Compose, o `app` usa hostnames internos (`db`, `sqs`,
 `keycloak`); só `OIDC_ISSUER` permanece como `http://localhost:8080/...`,
 porque o `iss` do token reflete o hostname usado na emissão, enquanto a
 busca do JWKS usa `OIDC_JWKS_URL` interno. A credencial do serviço vem do
-arquivo gerado pelo `sqs-init` (`.local/sqs-service.env`, via `env_file`
-opcional). O Compose preserva o volume do banco ao parar e usa credenciais
+arquivo gerado pelo `sqs-init` (`.local/sqs-service.env`), lido pelo
+entrypoint no start do container — nunca via `env_file`, que o Compose
+avalia antes do `sqs-init` rodar — com `su-exec` entregando a execução ao
+usuário não-root `app`. O Compose preserva o volume do banco ao parar e usa credenciais
 locais de teste. O README traz os comandos completos.
 O processo usa a role PostgreSQL `app`, com permissões limitadas; a role
 `wagering` é usada apenas para migrations.

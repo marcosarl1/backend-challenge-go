@@ -98,12 +98,15 @@ services:
     ports:
       - "8081:8081"
       - "9090:9090"
-    # Credencial do serviço gerada pelo sqs-init. `required: false` tolera a
-    # ausência do arquivo na primeira criação; como o app só é criado após
-    # o sqs-init concluir, o arquivo já existe nesse momento.
-    env_file:
-      - path: ./.local/sqs-service.env
-        required: false
+    # Credencial do serviço gerada pelo sqs-init. É lida pelo entrypoint no
+    # start do container (via volume), não via env_file: o Compose avalia
+    # env_file antes do sqs-init rodar, então uma rotação de chaves deixaria
+    # o app com a credencial antiga. O depends_on abaixo garante que o
+    # sqs-init já terminou quando o app inicia.
+    volumes:
+      - ./.local:/credentials:ro
+      - ./deploy/app/docker-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/entrypoint.sh"]
     environment:
       # Hostnames dentro da rede do Compose. O fluxo no host (`make run`)
       # usa os valores de `.env.example`, com `localhost`.

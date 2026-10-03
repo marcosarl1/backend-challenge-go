@@ -135,9 +135,10 @@ podem publicar a mesma porta do host.
 **`app` reiniciando com `UnrecognizedClientException` no SQS.** O MiniStack
 não tem volume: recriar o container `sqs` apaga os usuários IAM, mas os
 arquivos em `.local/` persistem no host e dessincronizam. O `sqs-init`
-regenera as chaves ao detectar a divergência, mas um container `app` já
-criado mantém as variáveis antigas. Recrie o `app` para absorver o arquivo
-atual:
+regenera as chaves ao detectar a divergência, e o `app` lê o arquivo atual
+a cada (re)start. Se a rotação acontecer com o `app` já em execução (ex.:
+`sqs-init` re-executado manualmente), ele mantém as variáveis antigas até
+ser recriado. Recrie o `app` para absorver o arquivo atual:
 
 ```bash
 docker compose up -d --force-recreate app
@@ -260,11 +261,116 @@ curl -fsS http://localhost:8081/wagering/transactions \
   -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$BET_ID\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-demo\",\"gameId\":\"game-demo\",\"kind\":\"BET\",\"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}"
 ```
 
-A chamada retorna `PROCESSED` e deixa o saldo em `75.00`. Repetir a mesma
-chamada `curl`, sem recriar `BET_ID`, retorna
-`idempotentReplay: true`, sem criar outro débito.
+A chamada retorna `PROCESSED` e deixa o saldo em `75.00`. Guarde o ID interno
+para consultar depois. Repetir a mesma chamada `curl`, sem recriar `BET_ID`,
+retorna `idempotentReplay: true`, sem criar outro débito.
 
-Consulte o saldo e o ledger:
+```bash
+BET_JSON=$(curl -fsS http://localhost:8081/wagering/transactions \
+  --oauth2-bearer "$PROVIDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: provider-a:$BET_ID" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$BET_ID\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-demo\",\"gameId\":\"game-demo\",\"kind\":\"BET\",\"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}")
+
+printf '%s\n' "$BET_JSON"
+BET_TX_ID=$(printf '%s' "$BET_JSON" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["transactionId"])')
+```
+
+### Crédito de prêmio (`WIN`)
+
+Um `WIN` sem referência credita direto. Saldo: `75.00` → `85.00`.
+
+```bash
+WIN_ID=win-demo-$(python3 -c 'import uuid; print(uuid.uuid4())')
+
+WIN_JSON=$(curl -fsS http://localhost:8081/wagering/transactions \
+  --oauth2-bearer "$PROVIDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: provider-a:$WIN_ID" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$WIN_ID\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-demo\",\"gameId\":\"game-demo\",\"kind\":\"WIN\",\"money\":{\"amount\":\"10.00\",\"currency\":\"BRL\"}}")
+
+printf '%s\n' "$WIN_JSON"
+WIN_TX_ID=$(printf '%s' "$WIN_JSON" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["transactionId"])')
+```
+
+### Aposta sem resultado (`LOSS`)
+
+`LOSS` exige `amount` igual a `"0.00"`: não movimenta saldo, não cria
+ledger nem altera a versão, mas gera `WagerTransactionProcessed`. Saldo
+permanece `85.00`.
+
+```bash
+LOSS_ID=loss-demo-$(python3 -c 'import uuid; print(uuid.uuid4())')
+
+curl -fsS http://localhost:8081/wagering/transactions \
+  --oauth2-bearer "$PROVIDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: provider-a:$LOSS_ID" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$LOSS_ID\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-demo\",\"gameId\":\"game-demo\",\"kind\":\"LOSS\",\"money\":{\"amount\":\"0.00\",\"currency\":\"BRL\"}}"
+```
+
+### Devolução (`REFUND`) e estorno (`ROLLBACK`)
+
+`REFUND` devolve integralmente uma `BET` processada (crédito). `ROLLBACK`
+desfaz uma `BET`, `WIN` ou `REFUND` com o movimento contrário (aqui, um
+`ROLLBACK` do `WIN` debita `10.00`). Ambos exigem
+`referenceExternalTransactionId` com mesmo provedor, jogador, carteira,
+moeda, rodada e valor. Saldo: `85.00` → `110.00` → `100.00`.
+
+```bash
+REFUND_ID=refund-demo-$(python3 -c 'import uuid; print(uuid.uuid4())')
+
+curl -fsS http://localhost:8081/wagering/transactions \
+  --oauth2-bearer "$PROVIDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: provider-a:$REFUND_ID" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$REFUND_ID\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-demo\",\"gameId\":\"game-demo\",\"kind\":\"REFUND\",\"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"},\"referenceExternalTransactionId\":\"$BET_ID\"}"
+
+ROLLBACK_ID=rollback-demo-$(python3 -c 'import uuid; print(uuid.uuid4())')
+
+curl -fsS http://localhost:8081/wagering/transactions \
+  --oauth2-bearer "$PROVIDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: provider-a:$ROLLBACK_ID" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$ROLLBACK_ID\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-demo\",\"gameId\":\"game-demo\",\"kind\":\"ROLLBACK\",\"money\":{\"amount\":\"10.00\",\"currency\":\"BRL\"},\"referenceExternalTransactionId\":\"$WIN_ID\"}"
+```
+
+Se a referência ainda não chegou, a resposta é `202` com `status`
+`PENDING_REFERENCE`; um worker resolve ou expira a pendência depois.
+
+### Rejeição por saldo (`422`)
+
+Uma `BET` acima do saldo retorna `422` com `failureCode`
+`INSUFFICIENT_FUNDS` e não movimenta nada. Com `-fsS` o `curl` esconde o
+corpo (exit 22); use `-s` para inspecioná-lo:
+
+```bash
+BIGBET_ID=bet-demo-$(python3 -c 'import uuid; print(uuid.uuid4())')
+
+curl -s http://localhost:8081/wagering/transactions \
+  --oauth2-bearer "$PROVIDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: provider-a:$BIGBET_ID" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$BIGBET_ID\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-demo\",\"gameId\":\"game-demo\",\"kind\":\"BET\",\"money\":{\"amount\":\"500.00\",\"currency\":\"BRL\"}}"
+```
+
+### Consultas de transação
+
+Com o token do provedor dono da operação, por ID interno ou externo:
+
+```bash
+curl -fsS "http://localhost:8081/wagering/transactions/$BET_TX_ID" \
+  --oauth2-bearer "$PROVIDER_TOKEN"
+
+curl -fsS "http://localhost:8081/providers/provider-a/wagering/transactions/$BET_ID" \
+  --oauth2-bearer "$PROVIDER_TOKEN"
+```
+
+Consultar transação de outro provedor retorna `404`, sem expor dados.
+
+### Saldo, ledger e reconciliação
 
 ```bash
 curl -fsS "http://localhost:8081/wallets/$WALLET_ID" \
@@ -272,7 +378,14 @@ curl -fsS "http://localhost:8081/wallets/$WALLET_ID" \
 
 curl -fsS "http://localhost:8081/wallets/$WALLET_ID/ledger?limit=50" \
   --oauth2-bearer "$INTERNAL_TOKEN"
+
+curl -fsS -X POST "http://localhost:8081/wallets/$WALLET_ID/reconciliation" \
+  --oauth2-bearer "$INTERNAL_TOKEN"
 ```
+
+A reconciliação reconstrói o saldo do ledger (`100.00` de abertura `-25.00`
+`+10.00` `+25.00` `-10.00` = `100.00`) e compara com o armazenado,
+reportando `consistent` e `difference` sem alterar dados.
 
 Valores monetários usam strings com duas casas decimais, como
 `{"amount":"25.00","currency":"BRL"}`. Para testar outro fluxo, altere

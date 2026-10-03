@@ -13,10 +13,11 @@ RUN go build -trimpath -ldflags="-s -w" -o /out/wagering ./cmd/wagering
 
 FROM alpine:3.20
 
-RUN addgroup -S app && adduser -S app -G app
+RUN apk add --no-cache su-exec && addgroup -S app && adduser -S app -G app
 
 COPY --from=build /out/wagering /usr/local/bin/wagering
+COPY deploy/app/docker-entrypoint.sh /entrypoint.sh
 
-USER app
-
-ENTRYPOINT ["/usr/local/bin/wagering"]
+# Sem `USER` aqui: o entrypoint lê a credencial do serviço (arquivo 600 do
+# host, legível só para root) e entrega a execução ao usuário `app`.
+ENTRYPOINT ["/entrypoint.sh"]
